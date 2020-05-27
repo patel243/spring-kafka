@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ public abstract class AbstractMessageListenerContainer<K, V>
 
 	private final ContainerProperties containerProperties;
 
-	private final Object lifecycleMonitor = new Object();
+	protected final Object lifecycleMonitor = new Object(); // NOSONAR
 
 	private String beanName;
 
@@ -104,17 +104,6 @@ public abstract class AbstractMessageListenerContainer<K, V>
 	private ApplicationContext applicationContext;
 
 	/**
-	 * Construct an instance with the provided properties.
-	 * @param containerProperties the properties.
-	 * @deprecated in favor of
-	 * {@link #AbstractMessageListenerContainer(ConsumerFactory, ContainerProperties)}.
-	 */
-	@Deprecated
-	protected AbstractMessageListenerContainer(ContainerProperties containerProperties) {
-		this(null, containerProperties);
-	}
-
-	/**
 	 * Construct an instance with the provided factory and properties.
 	 * @param consumerFactory the factory.
 	 * @param containerProperties the properties.
@@ -131,21 +120,25 @@ public abstract class AbstractMessageListenerContainer<K, V>
 		else if (containerProperties.getTopicPattern() != null) {
 			this.containerProperties = new ContainerProperties(containerProperties.getTopicPattern());
 		}
-		else if (containerProperties.getTopicPartitionsToAssign() != null) {
-			this.containerProperties = new ContainerProperties(containerProperties.getTopicPartitionsToAssign());
+		else if (containerProperties.getTopicPartitions() != null) {
+			this.containerProperties = new ContainerProperties(containerProperties.getTopicPartitions());
 		}
 		else {
 			throw new IllegalStateException("topics, topicPattern, or topicPartitions must be provided");
 		}
 
 		BeanUtils.copyProperties(containerProperties, this.containerProperties,
-				"topics", "topicPartitions", "topicPattern", "ackCount", "ackTime");
+				"topics", "topicPartitions", "topicPattern", "ackCount", "ackTime", "subBatchPerPartition");
 
 		if (containerProperties.getAckCount() > 0) {
 			this.containerProperties.setAckCount(containerProperties.getAckCount());
 		}
 		if (containerProperties.getAckTime() > 0) {
 			this.containerProperties.setAckTime(containerProperties.getAckTime());
+		}
+		Boolean subBatchPerPartition = containerProperties.getSubBatchPerPartition();
+		if (subBatchPerPartition != null) {
+			this.containerProperties.setSubBatchPerPartition(subBatchPerPartition);
 		}
 		if (this.containerProperties.getConsumerRebalanceListener() == null) {
 			this.containerProperties.setConsumerRebalanceListener(createSimpleLoggingConsumerRebalanceListener());
@@ -211,7 +204,7 @@ public abstract class AbstractMessageListenerContainer<K, V>
 	 * @return the error handler.
 	 * @since 2.2
 	 */
-	protected GenericErrorHandler<?> getGenericErrorHandler() {
+	public GenericErrorHandler<?> getGenericErrorHandler() {
 		return this.errorHandler;
 	}
 
@@ -252,7 +245,12 @@ public abstract class AbstractMessageListenerContainer<K, V>
 		return this.phase;
 	}
 
-	protected AfterRollbackProcessor<? super K, ? super V> getAfterRollbackProcessor() {
+	/**
+	 * Return the currently configured {@link AfterRollbackProcessor}.
+	 * @return the after rollback processor.
+	 * @since 2.2.14
+	 */
+	public AfterRollbackProcessor<? super K, ? super V> getAfterRollbackProcessor() {
 		return this.afterRollbackProcessor;
 	}
 
@@ -354,7 +352,7 @@ public abstract class AbstractMessageListenerContainer<K, V>
 				if (client != null) {
 					String[] topics = this.containerProperties.getTopics();
 					if (topics == null) {
-						topics = Arrays.stream(this.containerProperties.getTopicPartitionsToAssign())
+						topics = Arrays.stream(this.containerProperties.getTopicPartitions())
 								.map(TopicPartitionOffset::getTopic)
 								.toArray(String[]::new);
 					}
@@ -388,7 +386,7 @@ public abstract class AbstractMessageListenerContainer<K, V>
 	}
 
 	public void checkGroupId() {
-		if (this.containerProperties.getTopicPartitionsToAssign() == null) {
+		if (this.containerProperties.getTopicPartitions() == null) {
 			boolean hasGroupIdConsumerConfig = true; // assume true for non-standard containers
 			if (this.consumerFactory != null) { // we always have one for standard containers
 				Object groupIdConfig = this.consumerFactory.getConfigurationProperties()
@@ -406,16 +404,32 @@ public abstract class AbstractMessageListenerContainer<K, V>
 
 	@Override
 	public final void stop() {
+		stop(true);
+	}
+
+	/**
+	 * Stop the container.
+	 * @param wait wait for the listener to terminate.
+	 * @since 2.3.8
+	 */
+	public final void stop(boolean wait) {
 		synchronized (this.lifecycleMonitor) {
 			if (isRunning()) {
-				final CountDownLatch latch = new CountDownLatch(1);
-				doStop(latch::countDown);
-				try {
-					latch.await(this.containerProperties.getShutdownTimeout(), TimeUnit.MILLISECONDS); // NOSONAR
-					publishContainerStoppedEvent();
+				if (wait) {
+					final CountDownLatch latch = new CountDownLatch(1);
+					doStop(latch::countDown);
+					try {
+						latch.await(this.containerProperties.getShutdownTimeout(), TimeUnit.MILLISECONDS); // NOSONAR
+						publishContainerStoppedEvent();
+					}
+					catch (@SuppressWarnings("unused") InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
 				}
-				catch (@SuppressWarnings("unused") InterruptedException e) {
-					Thread.currentThread().interrupt();
+				else {
+					doStop(() -> {
+						publishContainerStoppedEvent();
+					});
 				}
 			}
 		}

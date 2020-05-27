@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -44,7 +45,6 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -123,7 +123,7 @@ public class ConcurrentMessageListenerContainerTests {
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<Integer, String>(props) {
 
 			@Override
-			protected KafkaConsumer<Integer, String> createKafkaConsumer(String groupId, String clientIdPrefix,
+			protected Consumer<Integer, String> createKafkaConsumer(String groupId, String clientIdPrefix,
 					String clientIdSuffixArg, Properties properties) {
 
 				overrides.set(properties);
@@ -133,6 +133,7 @@ public class ConcurrentMessageListenerContainerTests {
 		};
 		ContainerProperties containerProps = new ContainerProperties(topic1);
 		containerProps.setLogContainerConfig(true);
+		containerProps.setClientId("client");
 
 		final CountDownLatch latch = new CountDownLatch(3);
 		final Set<String> listenerThreadNames = new ConcurrentSkipListSet<>();
@@ -165,6 +166,10 @@ public class ConcurrentMessageListenerContainerTests {
 
 		ContainerTestUtils.waitForAssignment(container, embeddedKafka.getPartitionsPerTopic());
 		assertThat(container.getAssignedPartitions()).hasSize(2);
+		Map<String, Collection<TopicPartition>> assignments = container.getAssignmentsByClientId();
+		assertThat(assignments).hasSize(2);
+		assertThat(assignments.get("client-0")).isNotNull();
+		assertThat(assignments.get("client-1")).isNotNull();
 
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		ProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
@@ -218,7 +223,7 @@ public class ConcurrentMessageListenerContainerTests {
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<Integer, String>(props) {
 
 			@Override
-			protected KafkaConsumer<Integer, String> createKafkaConsumer(String groupId, String clientIdPrefix,
+			protected Consumer<Integer, String> createKafkaConsumer(String groupId, String clientIdPrefix,
 					String clientIdSuffixArg, Properties properties) {
 
 				overrides.set(properties);
@@ -290,7 +295,7 @@ public class ConcurrentMessageListenerContainerTests {
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<Integer, String>(props) {
 
 			@Override
-			protected KafkaConsumer<Integer, String> createKafkaConsumer(String groupId, String clientIdPrefix,
+			protected Consumer<Integer, String> createKafkaConsumer(String groupId, String clientIdPrefix,
 					String clientIdSuffixArg, Properties properties) {
 
 				overrides.set(properties);
@@ -386,7 +391,6 @@ public class ConcurrentMessageListenerContainerTests {
 		template.sendDefault(2, "qux");
 		template.flush();
 		Map<String, Object> props = KafkaTestUtils.consumerProps("testManualExisting", "false", embeddedKafka);
-		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(props);
 		ContainerProperties containerProps = new ContainerProperties(topic7);
 		final CountDownLatch latch = new CountDownLatch(8);
@@ -438,7 +442,6 @@ public class ConcurrentMessageListenerContainerTests {
 		template.sendDefault(2, "qux");
 		template.flush();
 		Map<String, Object> props = KafkaTestUtils.consumerProps("testManualExistingSync", "false", embeddedKafka);
-		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<Integer, String>(props);
 		ContainerProperties containerProps = new ContainerProperties(topic8);
 		containerProps.setSyncCommits(true);
@@ -451,6 +454,7 @@ public class ConcurrentMessageListenerContainerTests {
 			latch.countDown();
 		});
 		containerProps.setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+		containerProps.setClientId("myClientId");
 
 		ConcurrentMessageListenerContainer<Integer, String> container =
 				new ConcurrentMessageListenerContainer<>(cf, containerProps);
@@ -465,6 +469,9 @@ public class ConcurrentMessageListenerContainerTests {
 		template.flush();
 		assertThat(latch.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(bitSet.cardinality()).isEqualTo(8);
+		Set<String> clientIds = container.getAssignmentsByClientId().keySet();
+		assertThat(clientIds).hasSize(1);
+		assertThat(clientIds.iterator().next()).isEqualTo("myClientId-0");
 		container.stop();
 		this.logger.info("Stop MANUAL_IMMEDIATE with Existing");
 	}
@@ -481,10 +488,11 @@ public class ConcurrentMessageListenerContainerTests {
 			ConcurrentMessageListenerContainerTests.this.logger.info("paused start: " + message);
 			latch.countDown();
 		});
-
+		containerProps.setClientId("myClientId");
 		ConcurrentMessageListenerContainer<Integer, String> container =
 				new ConcurrentMessageListenerContainer<>(cf, containerProps);
 		container.setConcurrency(2);
+		container.setAlwaysClientIdSuffix(false);
 		container.setBeanName("testBatch");
 		container.pause();
 		container.start();
@@ -503,6 +511,11 @@ public class ConcurrentMessageListenerContainerTests {
 		container.resume();
 
 		assertThat(latch.await(60, TimeUnit.SECONDS)).isTrue();
+		Set<String> clientIds = container.getAssignmentsByClientId().keySet();
+		assertThat(clientIds).hasSize(2);
+		Iterator<String> iterator = clientIds.iterator();
+		assertThat(iterator.next()).startsWith("myClientId-");
+		assertThat(iterator.next()).startsWith("myClientId-");
 		container.stop();
 		this.logger.info("Stop paused start");
 	}
@@ -612,7 +625,6 @@ public class ConcurrentMessageListenerContainerTests {
 		});
 		containerProps.setSyncCommits(true);
 		containerProps.setAckMode(ContainerProperties.AckMode.RECORD);
-		containerProps.setAckOnError(false);
 		ConcurrentMessageListenerContainer<Integer, String> container = new ConcurrentMessageListenerContainer<>(cf,
 				containerProps);
 		container.setConcurrency(2);
@@ -682,6 +694,7 @@ public class ConcurrentMessageListenerContainerTests {
 		testAckOnErrorWithManualImmediateGuts(topic11, false);
 	}
 
+	@SuppressWarnings("deprecation")
 	private void testAckOnErrorWithManualImmediateGuts(String topic, boolean ackOnError) throws Exception {
 		logger.info("Start ack on error with ManualImmediate ack mode");
 		Map<String, Object> props = KafkaTestUtils.consumerProps("testMan" + ackOnError, "false", embeddedKafka);
@@ -702,9 +715,11 @@ public class ConcurrentMessageListenerContainerTests {
 			}
 
 		});
+		containerProps.setClientId("myClientId");
 		ConcurrentMessageListenerContainer<Integer, String> container = new ConcurrentMessageListenerContainer<>(cf,
 				containerProps);
 		container.setConcurrency(1);
+		container.setAlwaysClientIdSuffix(false);
 		container.setBeanName("testAckOnErrorWithManualImmediate");
 		container.start();
 		ContainerTestUtils.waitForAssignment(container, embeddedKafka.getPartitionsPerTopic());
@@ -717,6 +732,9 @@ public class ConcurrentMessageListenerContainerTests {
 		template.sendDefault(0, 1, "bar");
 		template.flush();
 		assertThat(latch.await(60, TimeUnit.SECONDS)).isTrue();
+		Set<String> clientIds = container.getAssignmentsByClientId().keySet();
+		assertThat(clientIds).hasSize(1);
+		assertThat(clientIds.iterator().next()).isEqualTo("myClientId");
 		container.stop();
 
 		Consumer<Integer, String> consumer = cf.createConsumer();

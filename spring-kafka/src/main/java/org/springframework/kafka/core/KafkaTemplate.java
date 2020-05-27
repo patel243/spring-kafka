@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,20 +17,32 @@
 package org.springframework.kafka.core;
 
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 
 import org.apache.commons.logging.LogFactory;
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextStoppedEvent;
 import org.springframework.core.log.LogAccessor;
+import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.kafka.support.KafkaUtils;
 import org.springframework.kafka.support.LoggingProducerListener;
@@ -40,6 +52,7 @@ import org.springframework.kafka.support.TransactionSupport;
 import org.springframework.kafka.support.converter.MessageConverter;
 import org.springframework.kafka.support.converter.MessagingMessageConverter;
 import org.springframework.kafka.support.converter.RecordMessageConverter;
+import org.springframework.kafka.support.micrometer.MicrometerHolder;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -61,11 +74,14 @@ import org.springframework.util.concurrent.SettableListenableFuture;
  * @author Biju Kunjummen
  * @author Endika Guti?rrez
  */
-public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
+public class KafkaTemplate<K, V> implements KafkaOperations<K, V>, ApplicationContextAware, BeanNameAware,
+		ApplicationListener<ContextStoppedEvent>, DisposableBean {
 
 	protected final LogAccessor logger = new LogAccessor(LogFactory.getLog(this.getClass())); //NOSONAR
 
 	private final ProducerFactory<K, V> producerFactory;
+
+	private final boolean customProducerFactory;
 
 	private final boolean autoFlush;
 
@@ -73,15 +89,27 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 
 	private final ThreadLocal<Producer<K, V>> producers = new ThreadLocal<>();
 
+	private final Map<String, String> micrometerTags = new HashMap<>();
+
+	private String beanName = "kafkaTemplate";
+
+	private ApplicationContext applicationContext;
+
 	private RecordMessageConverter messageConverter = new MessagingMessageConverter();
 
-	private volatile String defaultTopic;
+	private String defaultTopic;
 
-	private volatile ProducerListener<K, V> producerListener = new LoggingProducerListener<K, V>();
+	private ProducerListener<K, V> producerListener = new LoggingProducerListener<K, V>();
 
 	private String transactionIdPrefix;
 
 	private Duration closeTimeout = ProducerFactoryUtils.DEFAULT_CLOSE_TIMEOUT;
+
+	private boolean allowNonTransactional;
+
+	private volatile boolean micrometerEnabled = true;
+
+	private volatile MicrometerHolder micrometerHolder;
 
 	/**
 	 * Create an instance using the supplied producer factory and autoFlush false.
@@ -89,6 +117,19 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 	 */
 	public KafkaTemplate(ProducerFactory<K, V> producerFactory) {
 		this(producerFactory, false);
+	}
+
+	/**
+	 * Create an instance using the supplied producer factory and properties, with
+	 * autoFlush false. If the configOverrides is not null or empty, a new
+	 * {@link DefaultKafkaProducerFactory} will be created with merged producer properties
+	 * with the overrides being applied after the supplied factory's properties.
+	 * @param producerFactory the producer factory.
+	 * @param configOverrides producer configuration properties to override.
+	 * @since 2.5
+	 */
+	public KafkaTemplate(ProducerFactory<K, V> producerFactory, @Nullable Map<String, Object> configOverrides) {
+		this(producerFactory, false, configOverrides);
 	}
 
 	/**
@@ -103,9 +144,59 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 	 * @see Producer#flush()
 	 */
 	public KafkaTemplate(ProducerFactory<K, V> producerFactory, boolean autoFlush) {
-		this.producerFactory = producerFactory;
+		this(producerFactory, autoFlush, null);
+	}
+
+	/**
+	 * Create an instance using the supplied producer factory and autoFlush setting.
+	 * <p>
+	 * Set autoFlush to {@code true} if you have configured the producer's
+	 * {@code linger.ms} to a non-default value and wish send operations on this template
+	 * to occur immediately, regardless of that setting, or if you wish to block until the
+	 * broker has acknowledged receipt according to the producer's {@code acks} property.
+	 * If the configOverrides is not null or empty, a new
+	 * {@link DefaultKafkaProducerFactory} will be created with merged producer properties
+	 * with the overrides being applied after the supplied factory's properties.
+	 * @param producerFactory the producer factory.
+	 * @param autoFlush true to flush after each send.
+	 * @param configOverrides producer configuration properties to override.
+	 * @since 2.5
+	 * @see Producer#flush()
+	 */
+	public KafkaTemplate(ProducerFactory<K, V> producerFactory, boolean autoFlush,
+			@Nullable Map<String, Object> configOverrides) {
+
+		Assert.notNull(producerFactory, "'producerFactory' cannot be null");
 		this.autoFlush = autoFlush;
 		this.transactional = producerFactory.transactionCapable();
+		this.micrometerEnabled = KafkaUtils.MICROMETER_PRESENT;
+		this.customProducerFactory = configOverrides != null && configOverrides.size() > 0;
+		if (this.customProducerFactory) {
+			Map<String, Object> configs = new HashMap<>(producerFactory.getConfigurationProperties());
+			configs.putAll(configOverrides);
+			DefaultKafkaProducerFactory<K, V> newFactory = new DefaultKafkaProducerFactory<>(configs,
+					producerFactory.getKeySerializerSupplier(), producerFactory.getValueSerializerSupplier());
+			newFactory.setPhysicalCloseTimeout((int) producerFactory.getPhysicalCloseTimeout().getSeconds());
+			newFactory.setProducerPerConsumerPartition(producerFactory.isProducerPerConsumerPartition());
+			newFactory.setProducerPerThread(producerFactory.isProducerPerThread());
+			this.producerFactory = newFactory;
+		}
+		else {
+			this.producerFactory = producerFactory;
+		}
+	}
+
+	@Override
+	public void setBeanName(String name) {
+		this.beanName = name;
+	}
+
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+		this.applicationContext = applicationContext;
+		if (this.customProducerFactory) {
+			((DefaultKafkaProducerFactory<K, V>) this.producerFactory).setApplicationContext(applicationContext);
+		}
 	}
 
 	/**
@@ -182,12 +273,65 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 	}
 
 	/**
+	 * Set to true to allow a non-transactional send when the template is transactional.
+	 * @param allowNonTransactional true to allow.
+	 * @since 2.4.3
+	 */
+	public void setAllowNonTransactional(boolean allowNonTransactional) {
+		this.allowNonTransactional = allowNonTransactional;
+	}
+
+	@Override
+	public boolean isAllowNonTransactional() {
+		return this.allowNonTransactional;
+	}
+
+	/**
+	 * Set to false to disable micrometer timers, if micrometer is on the class path.
+	 * @param micrometerEnabled false to disable.
+	 * @since 2.5
+	 */
+	public void setMicrometerEnabled(boolean micrometerEnabled) {
+		this.micrometerEnabled = micrometerEnabled;
+	}
+
+	/**
+	 * Set additional tags for the Micrometer listener timers.
+	 * @param tags the tags.
+	 * @since 2.5
+	 */
+	public void setMicrometerTags(Map<String, String> tags) {
+		if (tags != null) {
+			this.micrometerTags.putAll(tags);
+		}
+	}
+
+	/**
 	 * Return the producer factory used by this template.
 	 * @return the factory.
 	 * @since 2.2.5
 	 */
+	@Override
 	public ProducerFactory<K, V> getProducerFactory() {
 		return this.producerFactory;
+	}
+
+	/**
+	 * Return the producer factory used by this template based on the topic.
+	 * The default implementation returns the only producer factory.
+	 * @param topic the topic.
+	 * @return the factory.
+	 * @since 2.5
+	 */
+	protected ProducerFactory<K, V> getProducerFactory(String topic) {
+		return this.producerFactory;
+	}
+
+	@Override
+	public void onApplicationEvent(ContextStoppedEvent event) {
+		if (this.customProducerFactory) {
+			((DefaultKafkaProducerFactory<K, V>) this.producerFactory).onApplicationEvent(event);
+		}
 	}
 
 	@Override
@@ -366,6 +510,17 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 
 	@Override
 	public void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets, String consumerGroupId) {
+		producerForOffsets().sendOffsetsToTransaction(offsets, consumerGroupId);
+	}
+
+	@Override
+	public void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets,
+			ConsumerGroupMetadata groupMetadata) {
+
+		producerForOffsets().sendOffsetsToTransaction(offsets, groupMetadata);
+	}
+
+	private Producer<K, V> producerForOffsets() {
 		Producer<K, V> producer = this.producers.get();
 		if (producer == null) {
 			@SuppressWarnings("unchecked")
@@ -374,7 +529,7 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 			Assert.isTrue(resourceHolder != null, "No transaction in process");
 			producer = resourceHolder.getProducer();
 		}
-		producer.sendOffsetsToTransaction(offsets, consumerGroupId);
+		return producer;
 	}
 
 	protected void closeProducer(Producer<K, V> producer, boolean inTx) {
@@ -390,18 +545,31 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 	 * RecordMetadata}.
 	 */
 	protected ListenableFuture<SendResult<K, V>> doSend(final ProducerRecord<K, V> producerRecord) {
-		if (this.transactional) {
-			Assert.state(inTransaction(),
-					"No transaction is in process; "
-						+ "possible solutions: run the template operation within the scope of a "
-						+ "template.executeInTransaction() operation, start a transaction with @Transactional "
-						+ "before invoking the template method, "
-						+ "run in a transaction started by a listener container when consuming a record");
-		}
-		final Producer<K, V> producer = getTheProducer();
+		final Producer<K, V> producer = getTheProducer(producerRecord.topic());
 		this.logger.trace(() -> "Sending: " + producerRecord);
 		final SettableListenableFuture<SendResult<K, V>> future = new SettableListenableFuture<>();
-		producer.send(producerRecord, buildCallback(producerRecord, producer, future));
+		Object sample = null;
+		if (this.micrometerEnabled && this.micrometerHolder == null) {
+			this.micrometerHolder = obtainMicrometerHolder();
+		}
+		if (this.micrometerHolder != null) {
+			sample = this.micrometerHolder.start();
+		}
+		Future<RecordMetadata> sendFuture =
+				producer.send(producerRecord, buildCallback(producerRecord, producer, future, sample));
+		// May be an immediate failure
+		if (sendFuture.isDone()) {
+			try {
+				sendFuture.get();
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new KafkaException("Interrupted", e);
+			}
+			catch (ExecutionException e) {
+				throw new KafkaException("Send failed", e.getCause()); // NOSONAR, stack trace
+			}
+		}
 		if (this.autoFlush) {
 			flush();
 		}
@@ -410,10 +578,14 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 	}
 
 	private Callback buildCallback(final ProducerRecord<K, V> producerRecord, final Producer<K, V> producer,
-			final SettableListenableFuture<SendResult<K, V>> future) {
+			final SettableListenableFuture<SendResult<K, V>> future, Object sample) {
+
 		return (metadata, exception) -> {
 			try {
 				if (exception == null) {
+					if (sample != null) {
+						this.micrometerHolder.success(sample);
+					}
 					future.set(new SendResult<>(producerRecord, metadata));
 					if (KafkaTemplate.this.producerListener != null) {
 						KafkaTemplate.this.producerListener.onSuccess(producerRecord, metadata);
@@ -421,6 +593,9 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 					KafkaTemplate.this.logger.trace(() -> "Sent ok: " + producerRecord + ", metadata: " + metadata);
 				}
 				else {
+					if (sample != null) {
+						this.micrometerHolder.failure(sample, exception.getClass().getSimpleName());
+					}
 					future.setException(new KafkaProducerException(producerRecord, "Failed to send", exception));
 					if (KafkaTemplate.this.producerListener != null) {
 						KafkaTemplate.this.producerListener.onError(producerRecord, exception);
@@ -438,11 +613,12 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 
 
 	/**
-	 * Return true if the template is currently running in a transaction on the
-	 * calling thread.
+	 * Return true if the template is currently running in a transaction on the calling
+	 * thread.
 	 * @return true if a transaction is running.
 	 * @since 2.2.1
 	 */
+	@Override
 	public boolean inTransaction() {
 		return this.transactional && (this.producers.get() != null
 				|| TransactionSynchronizationManager.getResource(this.producerFactory) != null
@@ -450,7 +626,24 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 	}
 
 	private Producer<K, V> getTheProducer() {
-		if (this.transactional) {
+		return getTheProducer(null);
+	}
+
+	protected Producer<K, V> getTheProducer(@SuppressWarnings("unused") @Nullable String topic) {
+		boolean transactionalProducer = this.transactional;
+		if (transactionalProducer) {
+			boolean inTransaction = inTransaction();
+			Assert.state(this.allowNonTransactional || inTransaction,
+					"No transaction is in process; "
+						+ "possible solutions: run the template operation within the scope of a "
+						+ "template.executeInTransaction() operation, start a transaction with @Transactional "
+						+ "before invoking the template method, "
+						+ "run in a transaction started by a listener container when consuming a record");
+			if (!inTransaction) {
+				transactionalProducer = false;
+			}
+		}
+		if (transactionalProducer) {
 			Producer<K, V> producer = this.producers.get();
 			if (producer != null) {
 				return producer;
@@ -459,8 +652,40 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V> {
 					.getTransactionalResourceHolder(this.producerFactory, this.transactionIdPrefix, this.closeTimeout);
 			return holder.getProducer();
 		}
+		else if (this.allowNonTransactional) {
+			return this.producerFactory.createNonTransactionalProducer();
+		}
+		else if (topic == null) {
+			return this.producerFactory.createProducer();
+		}
 		else {
-			return this.producerFactory.createProducer(this.transactionIdPrefix);
+			return getProducerFactory(topic).createProducer();
+		}
+	}
+
+	@Nullable
+	private MicrometerHolder obtainMicrometerHolder() {
+		MicrometerHolder holder = null;
+		try {
+			if (KafkaUtils.MICROMETER_PRESENT) {
+				holder = new MicrometerHolder(this.applicationContext, this.beanName,
+						"spring.kafka.template", "KafkaTemplate Timer",
+						this.micrometerTags);
+			}
+		}
+		catch (@SuppressWarnings("unused") IllegalStateException ex) {
+			this.micrometerEnabled = false;
+		}
+		return holder;
+	}
+
+	@Override
+	public void destroy() {
+		if (this.micrometerHolder != null) {
+			this.micrometerHolder.destroy();
+		}
+		if (this.customProducerFactory) {
+			((DefaultKafkaProducerFactory<K, V>) this.producerFactory).destroy();
 		}
 	}
 

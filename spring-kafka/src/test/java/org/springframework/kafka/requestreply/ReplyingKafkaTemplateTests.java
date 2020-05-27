@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.mock;
@@ -42,11 +41,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Headers;
@@ -88,6 +87,7 @@ import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
+import org.springframework.util.concurrent.SettableListenableFuture;
 
 /**
  * @author Gary Russell
@@ -102,7 +102,8 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 		ReplyingKafkaTemplateTests.D_REPLY, ReplyingKafkaTemplateTests.D_REQUEST,
 		ReplyingKafkaTemplateTests.E_REPLY, ReplyingKafkaTemplateTests.E_REQUEST,
 		ReplyingKafkaTemplateTests.F_REPLY, ReplyingKafkaTemplateTests.F_REQUEST,
-		ReplyingKafkaTemplateTests.G_REPLY, ReplyingKafkaTemplateTests.G_REQUEST })
+		ReplyingKafkaTemplateTests.G_REPLY, ReplyingKafkaTemplateTests.G_REQUEST,
+		ReplyingKafkaTemplateTests.H_REPLY, ReplyingKafkaTemplateTests.H_REQUEST })
 public class ReplyingKafkaTemplateTests {
 
 	public static final String A_REPLY = "aReply";
@@ -132,6 +133,10 @@ public class ReplyingKafkaTemplateTests {
 	public static final String G_REPLY = "gReply";
 
 	public static final String G_REQUEST = "gRequest";
+
+	public static final String H_REPLY = "hReply";
+
+	public static final String H_REQUEST = "hRequest";
 
 	@Autowired
 	private EmbeddedKafkaBroker embeddedKafka;
@@ -190,6 +195,28 @@ public class ReplyingKafkaTemplateTests {
 			future.getSendFuture().get(10, TimeUnit.SECONDS); // send ok
 			ConsumerRecord<Integer, String> consumerRecord = future.get(30, TimeUnit.SECONDS);
 			assertThat(consumerRecord.value()).isEqualTo("FOO");
+		}
+		finally {
+			template.stop();
+			template.destroy();
+		}
+	}
+
+	@Test
+	public void testMessageReturnNoHeadersProvidedByListener() throws Exception {
+		ReplyingKafkaTemplate<Integer, String, String> template = createTemplate(H_REPLY);
+		try {
+			template.setDefaultReplyTimeout(Duration.ofSeconds(30));
+			ProducerRecord<Integer, String> record = new ProducerRecord<>(H_REQUEST, "foo");
+			record.headers().add(new RecordHeader(KafkaHeaders.REPLY_TOPIC, H_REPLY.getBytes()));
+			byte[] four = new byte[4];
+			four[3] = 4;
+			record.headers().add(new RecordHeader(KafkaHeaders.REPLY_PARTITION, four));
+			RequestReplyFuture<Integer, String, String> future = template.sendAndReceive(record);
+			future.getSendFuture().get(10, TimeUnit.SECONDS); // send ok
+			ConsumerRecord<Integer, String> consumerRecord = future.get(30, TimeUnit.SECONDS);
+			assertThat(consumerRecord.value()).isEqualTo("FOO");
+			assertThat(consumerRecord.partition()).isEqualTo(4);
 		}
 		finally {
 			template.stop();
@@ -396,12 +423,12 @@ public class ReplyingKafkaTemplateTests {
 		given(container.getContainerProperties()).willReturn(properties);
 		ProducerFactory pf = mock(ProducerFactory.class);
 		Producer producer = mock(Producer.class);
-		given(pf.createProducer(isNull())).willReturn(producer);
+		given(pf.createProducer()).willReturn(producer);
 		AtomicReference<byte[]> correlation = new AtomicReference<>();
 		willAnswer(invocation -> {
 			ProducerRecord rec = invocation.getArgument(0);
 			correlation.set(rec.headers().lastHeader(KafkaHeaders.CORRELATION_ID).value());
-			return null;
+			return new SettableListenableFuture<>();
 		}).given(producer).send(any(), any());
 		AggregatingReplyingKafkaTemplate template = new AggregatingReplyingKafkaTemplate(pf, container,
 				(list, timeout) -> true);
@@ -442,9 +469,7 @@ public class ReplyingKafkaTemplateTests {
 			}
 
 		});
-		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps(this.testName, "false",
-				embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps(this.testName, "false", embeddedKafka);
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
 		KafkaMessageListenerContainer<Integer, String> container = new KafkaMessageListenerContainer<>(cf,
 				containerProperties);
@@ -462,9 +487,7 @@ public class ReplyingKafkaTemplateTests {
 	public ReplyingKafkaTemplate<Integer, String, String> createTemplate(TopicPartitionOffset topic) {
 
 		ContainerProperties containerProperties = new ContainerProperties(topic);
-		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps(this.testName, "false",
-				embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps(this.testName, "false", embeddedKafka);
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
 		KafkaMessageListenerContainer<Integer, String> container = new KafkaMessageListenerContainer<>(cf,
 				containerProperties);
@@ -483,9 +506,7 @@ public class ReplyingKafkaTemplateTests {
 
 		ContainerProperties containerProperties = new ContainerProperties(topic);
 		containerProperties.setAckMode(AckMode.MANUAL_IMMEDIATE);
-		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps(this.testName, "false",
-				embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps(this.testName, "false", embeddedKafka);
 		DefaultKafkaConsumerFactory<Integer, Collection<ConsumerRecord<Integer, String>>> cf =
 				new DefaultKafkaConsumerFactory<>(consumerProps);
 		KafkaMessageListenerContainer<Integer, Collection<ConsumerRecord<Integer, String>>> container =
@@ -536,13 +557,13 @@ public class ReplyingKafkaTemplateTests {
 		@Bean
 		public DefaultKafkaProducerFactory<Integer, String> pf() {
 			Map<String, Object> producerProps = KafkaTestUtils.producerProps(this.embeddedKafka);
+			producerProps.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 5000L);
 			return new DefaultKafkaProducerFactory<>(producerProps);
 		}
 
 		@Bean
 		public DefaultKafkaConsumerFactory<Integer, String> cf() {
 			Map<String, Object> consumerProps = KafkaTestUtils.consumerProps("serverSide", "false", this.embeddedKafka);
-			consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 			return new DefaultKafkaConsumerFactory<>(consumerProps);
 		}
 
@@ -629,6 +650,15 @@ public class ReplyingKafkaTemplateTests {
 					in.getHeaders().get("custom.correlation.id", byte[].class)));
 			template().send(record);
 		}
+
+		@KafkaListener(id = H_REQUEST, topics = H_REQUEST)
+		@SendTo  // default REPLY_TOPIC header
+		public Message<?> messageReturn(String in) {
+			return MessageBuilder.withPayload(in.toUpperCase())
+					.setHeader(KafkaHeaders.MESSAGE_KEY, 42)
+					.build();
+		}
+
 	}
 
 	@KafkaListener(topics = C_REQUEST, groupId = C_REQUEST)
@@ -638,6 +668,7 @@ public class ReplyingKafkaTemplateTests {
 		@KafkaHandler
 		public Message<?> listen1(String in, @Header(KafkaHeaders.REPLY_TOPIC) byte[] replyTo,
 				@Header(KafkaHeaders.CORRELATION_ID) byte[] correlation) {
+
 			return MessageBuilder.withPayload(in.toUpperCase())
 					.setHeader(KafkaHeaders.TOPIC, replyTo)
 					.setHeader(KafkaHeaders.MESSAGE_KEY, 42)

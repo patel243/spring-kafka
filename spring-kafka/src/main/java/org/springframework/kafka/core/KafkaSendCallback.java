@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,21 +14,22 @@
  * limitations under the License.
  */
 
-package org.springframework.kafka.support;
+package org.springframework.kafka.core;
+
+import org.springframework.kafka.support.SendResult;
+import org.springframework.util.concurrent.ListenableFutureCallback;
 
 /**
- * No-op implementation of {@link ProducerListener}, to be used as base class for other implementations.
- *
- * @deprecated as the {@link ProducerListener} has default methods and can be implemented directly without the need for this adapter
+ * An enhanced {@link ListenableFutureCallback} for reporting
+ * {@link KafkaProducerException}s.
  *
  * @param <K> the key type.
  * @param <V> the value type.
  *
- * @author Marius Bogoevici
  * @author Gary Russell
- * @author Artem Bilan
- * @author Endika Guti?rrez
+ * @since 2.5
+ *
  */
-@Deprecated
-public abstract class ProducerListenerAdapter<K, V> implements ProducerListener<K, V> {
+public interface KafkaSendCallback<K, V> extends ListenableFutureCallback<SendResult<K, V>>, KafkaFailureCallback<K, V> {
+
 }

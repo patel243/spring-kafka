@@ -18,9 +18,14 @@ package org.springframework.kafka.listener;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Collections;
+import java.util.List;
+
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
 
-import org.springframework.kafka.test.utils.KafkaTestUtils;
+import org.springframework.kafka.support.TopicPartitionOffset;
+import org.springframework.util.backoff.FixedBackOff;
 
 /**
  * @author Gary Russell
@@ -30,22 +35,38 @@ import org.springframework.kafka.test.utils.KafkaTestUtils;
 public class FailedRecordProcessorTests {
 
 	@Test
-	void testDefaultBackOff() {
-		FailedRecordProcessor frp = new FailedRecordProcessor(null, 1) {
+	void deliveryAttempts() {
+		FailedRecordProcessor frp = new FailedRecordProcessor(null, new FixedBackOff(0, 2)) {
 		};
-		assertThat(KafkaTestUtils.getPropertyValue(frp, "failureTracker.backOff.interval", Long.class)).isEqualTo(0L);
-		assertThat(KafkaTestUtils.getPropertyValue(frp, "failureTracker.backOff.maxAttempts", Long.class))
-				.isEqualTo(0L);
-		frp = new FailedRecordProcessor(null, 0) {
-		};
-		assertThat(KafkaTestUtils.getPropertyValue(frp, "failureTracker.backOff.interval", Long.class)).isEqualTo(0L);
-		assertThat(KafkaTestUtils.getPropertyValue(frp, "failureTracker.backOff.maxAttempts", Long.class))
-				.isEqualTo(0L);
-		frp = new FailedRecordProcessor(null, -1) {
-		};
-		assertThat(KafkaTestUtils.getPropertyValue(frp, "failureTracker.backOff.interval", Long.class)).isEqualTo(0L);
-		assertThat(KafkaTestUtils.getPropertyValue(frp, "failureTracker.backOff.maxAttempts", Long.class))
-				.isEqualTo(Long.MAX_VALUE);
+		TopicPartitionOffset tpo1 = new TopicPartitionOffset("foo", 0, 0L);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(1);
+		List<ConsumerRecord<?, ?>> records = Collections
+				.singletonList(new ConsumerRecord<Object, Object>("foo", 0, 0L, null, null));
+		RuntimeException exception = new RuntimeException();
+		frp.getSkipPredicate(records, exception).test(records.get(0), exception);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(2);
+		frp.getSkipPredicate(records, exception).test(records.get(0), exception);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(3);
+		frp.getSkipPredicate(records, exception).test(records.get(0), exception);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(1);
+		frp.getSkipPredicate(records, exception).test(records.get(0), exception);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(2);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(2);
+		// new partition
+		TopicPartitionOffset tpo2 = new TopicPartitionOffset("foo", 1, 0L);
+		assertThat(frp.deliveryAttempt(tpo2)).isEqualTo(1);
+		frp.getSkipPredicate(records, exception).test(new ConsumerRecord<Object, Object>("foo", 1, 0L, null, null),
+				exception);
+		assertThat(frp.deliveryAttempt(tpo2)).isEqualTo(2);
+		// new offset
+		tpo2 = new TopicPartitionOffset("foo", 1, 1L);
+		assertThat(frp.deliveryAttempt(tpo2)).isEqualTo(1);
+		frp.getSkipPredicate(records, exception).test(new ConsumerRecord<Object, Object>("foo", 1, 1L, null, null),
+				exception);
+		assertThat(frp.deliveryAttempt(tpo2)).isEqualTo(2);
+		// back to original
+		frp.getSkipPredicate(records, exception).test(records.get(0), exception);
+		assertThat(frp.deliveryAttempt(tpo1)).isEqualTo(3);
 	}
 
 }

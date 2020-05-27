@@ -35,6 +35,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -47,12 +48,15 @@ import javax.validation.Valid;
 import javax.validation.ValidationException;
 import javax.validation.constraints.Max;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -79,6 +83,8 @@ import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.MicrometerConsumerListener;
+import org.springframework.kafka.core.MicrometerProducerListener;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.event.ListenerContainerIdleEvent;
 import org.springframework.kafka.listener.AbstractConsumerSeekAware;
@@ -136,6 +142,8 @@ import org.springframework.util.concurrent.ListenableFuture;
 import org.springframework.validation.Errors;
 import org.springframework.validation.Validator;
 
+import io.micrometer.core.instrument.ImmutableTag;
+import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -162,6 +170,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 public class EnableKafkaIntegrationTests {
 
 	private static final String DEFAULT_TEST_GROUP_ID = "testAnnot";
+
+	private static final Log logger = LogFactory.getLog(EnableKafkaIntegrationTests.class);
 
 	@Autowired
 	private EmbeddedKafkaBroker embeddedKafka;
@@ -244,13 +254,21 @@ public class EnableKafkaIntegrationTests {
 		assertThat(this.listener.topic).isEqualTo("annotated2");
 		assertThat(this.listener.receivedGroupId).isEqualTo("bar");
 
+		assertThat(this.meterRegistry.get("spring.kafka.template")
+				.tag("name", "template")
+				.tag("extraTag", "bar")
+				.tag("result", "success")
+				.timer()
+				.count())
+						.isGreaterThan(0L);
+
 		assertThat(this.meterRegistry.get("spring.kafka.listener")
-			.tag("name", "bar-0")
-			.tag("extraTag", "foo")
-			.tag("result", "success")
-			.timer()
-			.count())
-		.isEqualTo(2L);
+				.tag("name", "bar-0")
+				.tag("extraTag", "foo")
+				.tag("result", "success")
+				.timer()
+				.count())
+						.isEqualTo(2L);
 
 		template.send("annotated3", 0, "foo");
 		template.flush();
@@ -309,7 +327,8 @@ public class EnableKafkaIntegrationTests {
 		offset = KafkaTestUtils.getPropertyValue(fizContainer, "topicPartitions",
 				TopicPartitionOffset[].class)[3];
 		assertThat(offset.isRelativeToCurrent()).isTrue();
-		assertThat(KafkaTestUtils.getPropertyValue(fizContainer, "listenerConsumer.consumer.groupId"))
+		assertThat(KafkaTestUtils.getPropertyValue(fizContainer,
+						"listenerConsumer.consumer.groupId", Optional.class).get())
 				.isEqualTo("fiz");
 		assertThat(KafkaTestUtils.getPropertyValue(fizContainer, "listenerConsumer.consumer.clientId"))
 				.isEqualTo("clientIdViaAnnotation-0");
@@ -429,7 +448,8 @@ public class EnableKafkaIntegrationTests {
 		assertThat(buzConcurrentContainer).isNotNull();
 		MessageListenerContainer buzContainer = (MessageListenerContainer) KafkaTestUtils
 				.getPropertyValue(buzConcurrentContainer, "containers", List.class).get(0);
-		assertThat(KafkaTestUtils.getPropertyValue(buzContainer, "listenerConsumer.consumer.groupId"))
+		assertThat(KafkaTestUtils.getPropertyValue(buzContainer,
+						"listenerConsumer.consumer.groupId", Optional.class).get())
 				.isEqualTo("buz.explicitGroupId");
 	}
 
@@ -780,6 +800,28 @@ public class EnableKafkaIntegrationTests {
 		assertThat(this.listener.keyLatch.await(30, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.listener.convertedKey).isEqualTo("foo");
 		assertThat(this.config.intercepted).isTrue();
+		try {
+			assertThat(this.meterRegistry.get("kafka.consumer.coordinator.join.total")
+					.tag("consumerTag", "bytesString")
+					.tag("spring.id", "bytesStringConsumerFactory.tag-0")
+					.functionCounter()
+					.count())
+						.isGreaterThan(0);
+
+			assertThat(this.meterRegistry.get("kafka.producer.node.incoming.byte.total")
+					.tag("producerTag", "bytesString")
+					.tag("spring.id", "bytesStringProducerFactory.bsPF-1")
+					.functionCounter()
+					.count())
+						.isGreaterThan(0);
+		}
+		catch (Exception e) {
+			logger.error(this.meterRegistry.getMeters()
+					.stream()
+					.map(meter -> "\n" + meter.getId())
+					.collect(Collectors.toList()), e);
+			throw e;
+		}
 	}
 
 	@Test
@@ -865,9 +907,17 @@ public class EnableKafkaIntegrationTests {
 		@Autowired
 		private EmbeddedKafkaBroker embeddedKafka;
 
+		@SuppressWarnings("unchecked")
 		@Bean
 		public MeterRegistry meterRegistry() {
-			return new SimpleMeterRegistry();
+			SimpleMeterRegistry reg = new SimpleMeterRegistry();
+			List<java.util.function.Consumer<Meter>> al =
+					KafkaTestUtils.getPropertyValue(reg, "meterAddedListeners", List.class);
+			List<java.util.function.Consumer<Meter>> rl =
+					KafkaTestUtils.getPropertyValue(reg, "meterRemovedListeners", List.class);
+			al.add(meter -> logger.warn("Added:   " + meter.getId()));
+			rl.add(meter -> logger.warn("Removed: " + meter.getId()));
+			return reg;
 		}
 
 		@Bean
@@ -1151,6 +1201,7 @@ public class EnableKafkaIntegrationTests {
 			return factory;
 		}
 
+		@SuppressWarnings("deprecation")
 		@Bean
 		public KafkaListenerContainerFactory<ConcurrentMessageListenerContainer<Integer, String>>
 				recordAckListenerContainerFactory() {
@@ -1174,7 +1225,10 @@ public class EnableKafkaIntegrationTests {
 		public DefaultKafkaConsumerFactory<byte[], String> bytesStringConsumerFactory() {
 			Map<String, Object> configs = consumerConfigs();
 			configs.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
-			return new DefaultKafkaConsumerFactory<>(configs);
+			DefaultKafkaConsumerFactory<byte[], String> cf = new DefaultKafkaConsumerFactory<>(configs);
+			cf.addListener(new MicrometerConsumerListener<byte[], String>(meterRegistry(),
+					Collections.singletonList(new ImmutableTag("consumerTag", "bytesString"))));
+			return cf;
 		}
 
 		private ConsumerFactory<Integer, String> configuredConsumerFactory(String clientAndGroupId) {
@@ -1189,7 +1243,6 @@ public class EnableKafkaIntegrationTests {
 		public Map<String, Object> consumerConfigs() {
 			Map<String, Object> consumerProps =
 					KafkaTestUtils.consumerProps(DEFAULT_TEST_GROUP_ID, "false", this.embeddedKafka);
-			consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 			return consumerProps;
 		}
 
@@ -1246,7 +1299,11 @@ public class EnableKafkaIntegrationTests {
 		public ProducerFactory<byte[], String> bytesStringProducerFactory() {
 			Map<String, Object> configs = producerConfigs();
 			configs.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
-			return new DefaultKafkaProducerFactory<>(configs);
+			configs.put(ProducerConfig.CLIENT_ID_CONFIG, "bsPF");
+			DefaultKafkaProducerFactory<byte[], String> pf = new DefaultKafkaProducerFactory<>(configs);
+			pf.addListener(new MicrometerProducerListener<byte[], String>(meterRegistry(),
+					Collections.singletonList(new ImmutableTag("producerTag", "bytesString"))));
+			return pf;
 		}
 
 		@Bean
@@ -1256,7 +1313,9 @@ public class EnableKafkaIntegrationTests {
 
 		@Bean
 		public KafkaTemplate<Integer, String> template() {
-			return new KafkaTemplate<>(producerFactory());
+			KafkaTemplate<Integer, String> kafkaTemplate = new KafkaTemplate<>(producerFactory());
+			kafkaTemplate.setMicrometerTags(Collections.singletonMap("extraTag", "bar"));
+			return kafkaTemplate;
 		}
 
 		@Bean
@@ -1852,21 +1911,24 @@ public class EnableKafkaIntegrationTests {
 			for (int i = 0; i < topicsHeader.size(); i++) {
 				this.latch17.countDown();
 				String inTopic = topicsHeader.get(i);
-				if ("annotated26".equals(inTopic) && consumer.committed(Collections.singleton(
-						new org.apache.kafka.common.TopicPartition(inTopic, partitionsHeader.get(i))))
-							.values()
-							.iterator()
-							.next()
-							.offset() == 1) {
-					this.latch18.countDown();
-				}
-				else if ("annotated27".equals(inTopic) && consumer.committed(Collections.singleton(
-						new org.apache.kafka.common.TopicPartition(inTopic, partitionsHeader.get(i))))
-							.values()
-							.iterator()
-							.next()
-							.offset() == 3) {
-					this.latch18.countDown();
+				Map<org.apache.kafka.common.TopicPartition, OffsetAndMetadata> committed = consumer.committed(
+						Collections.singleton(
+								new org.apache.kafka.common.TopicPartition(inTopic, partitionsHeader.get(i))));
+				if (committed.values().iterator().next() != null) {
+					if ("annotated26".equals(inTopic) && committed
+								.values()
+								.iterator()
+								.next()
+								.offset() == 1) {
+						this.latch18.countDown();
+					}
+					else if ("annotated27".equals(inTopic) && committed
+								.values()
+								.iterator()
+								.next()
+								.offset() == 3) {
+						this.latch18.countDown();
+					}
 				}
 			}
 		}
@@ -1877,7 +1939,7 @@ public class EnableKafkaIntegrationTests {
 			// empty
 		}
 
-		@KafkaListener(id = "bytesKey", topics = "annotated36",
+		@KafkaListener(id = "bytesKey", topics = "annotated36", clientIdPrefix = "tag",
 				containerFactory = "bytesStringListenerContainerFactory")
 		public void bytesKey(String in, @Header(KafkaHeaders.RECEIVED_MESSAGE_KEY) String key) {
 			this.convertedKey = key;

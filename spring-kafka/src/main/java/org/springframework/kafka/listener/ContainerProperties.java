@@ -17,7 +17,6 @@
 package org.springframework.kafka.listener;
 
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -25,6 +24,7 @@ import java.util.Properties;
 import java.util.regex.Pattern;
 
 import org.springframework.core.task.AsyncListenableTaskExecutor;
+import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.kafka.support.TopicPartitionOffset;
 import org.springframework.lang.Nullable;
 import org.springframework.scheduling.TaskScheduler;
@@ -124,6 +124,25 @@ public class ContainerProperties extends ConsumerProperties {
 	}
 
 	/**
+	 * Mode for exactly once semantics.
+	 *
+	 * @since 2.5
+	 */
+	public enum EOSMode {
+
+		/**
+		 * 'transactional.id' fencing (0.11 - 2.4 brokers).
+		 */
+		ALPHA,
+
+		/**
+		 *  fetch-offset-request fencing (2.5+ brokers).
+		 */
+		BETA,
+
+	}
+
+	/**
 	 * The default {@link #setShutdownTimeout(long) shutDownTimeout} (ms).
 	 */
 	public static final long DEFAULT_SHUTDOWN_TIMEOUT = 10_000L;
@@ -139,6 +158,8 @@ public class ContainerProperties extends ConsumerProperties {
 	public static final float DEFAULT_NO_POLL_THRESHOLD = 3f;
 
 	private static final Duration DEFAULT_CONSUMER_START_TIMEOUT = Duration.ofSeconds(30);
+
+	private static final int DEFAULT_ACK_TIME = 5000;
 
 	private final Map<String, String> micrometerTags = new HashMap<>();
 
@@ -162,14 +183,14 @@ public class ContainerProperties extends ConsumerProperties {
 	 * committed when {@link AckMode#COUNT} or {@link AckMode#COUNT_TIME} is being
 	 * used.
 	 */
-	private int ackCount;
+	private int ackCount = 1;
 
 	/**
 	 * The time (ms) after which outstanding offsets should be committed when
 	 * {@link AckMode#TIME} or {@link AckMode#COUNT_TIME} is being used. Should be
 	 * larger than
 	 */
-	private long ackTime;
+	private long ackTime = DEFAULT_ACK_TIME;
 
 	/**
 	 * The message listener; must be a {@link org.springframework.kafka.listener.MessageListener}
@@ -211,9 +232,13 @@ public class ContainerProperties extends ConsumerProperties {
 
 	private Duration consumerStartTimout = DEFAULT_CONSUMER_START_TIMEOUT;
 
-	private boolean subBatchPerPartition;
+	private Boolean subBatchPerPartition;
 
-	private AssignmentCommitOption assignmentCommitOption = AssignmentCommitOption.ALWAYS;
+	private AssignmentCommitOption assignmentCommitOption = AssignmentCommitOption.LATEST_ONLY_NO_TX;
+
+	private boolean deliveryAttemptHeader;
+
+	private EOSMode eosMode;
 
 	/**
 	 * Create properties for a container that will subscribe to the specified topics.
@@ -234,27 +259,6 @@ public class ContainerProperties extends ConsumerProperties {
 	 */
 	public ContainerProperties(Pattern topicPattern) {
 		super(topicPattern);
-	}
-
-	/**
-	 * Create properties for a container that will assign itself the provided topic
-	 * partitions.
-	 * @param topicPartitions the topic partitions.
-	 * @deprecated in favor of {@link #ContainerProperties(TopicPartitionOffset...)}.
-	 */
-	@Deprecated
-	public ContainerProperties(org.springframework.kafka.support.TopicPartitionInitialOffset... topicPartitions) {
-		super(convertTopicPartitions(topicPartitions));
-	}
-
-	@Deprecated
-	private static TopicPartitionOffset[] convertTopicPartitions(
-			org.springframework.kafka.support.TopicPartitionInitialOffset[] topicPartitions) {
-
-		Assert.notEmpty(topicPartitions, "An array of topicPartitions must be provided");
-		return Arrays.stream(topicPartitions)
-				.map(org.springframework.kafka.support.TopicPartitionInitialOffset::toTPO)
-				.toArray(TopicPartitionOffset[]::new);
 	}
 
 	/**
@@ -287,7 +291,11 @@ public class ContainerProperties extends ConsumerProperties {
 	 * <li>MANUAL: Listener is responsible for acking - use a
 	 * {@link org.springframework.kafka.listener.AcknowledgingMessageListener}.
 	 * </ul>
+	 * Ignored when transactions are being used. Transactional consumers commit offsets
+	 * with semantics equivalent to {@code RECORD} or {@code BATCH}, depending on
+	 * the listener type.
 	 * @param ackMode the {@link AckMode}; default BATCH.
+	 * @see #setTransactionManager(PlatformTransactionManager)
 	 */
 	public void setAckMode(AckMode ackMode) {
 		Assert.notNull(ackMode, "'ackMode' cannot be null");
@@ -380,27 +388,13 @@ public class ContainerProperties extends ConsumerProperties {
 	 * rolled back unless an error handler is provided that handles the error and exits
 	 * normally; in which case the offsets are sent to the transaction and the transaction
 	 * is committed.
+	 * @deprecated in favor of {@code GenericErrorHandler.isAckAfterHandle()}.
 	 * @param ackOnError whether the container should acknowledge messages that throw
 	 * exceptions.
 	 */
+	@Deprecated
 	public void setAckOnError(boolean ackOnError) {
 		this.ackOnError = ackOnError;
-	}
-
-	/**
-	 * Return the topics/partitions to be manually assigned.
-	 * @deprecated in favor of {@link #getTopicPartitionsToAssign()}.
-	 * @return the topics/partitions.
-	 */
-	@Deprecated
-	@Nullable
-	public org.springframework.kafka.support.TopicPartitionInitialOffset[] getTopicPartitions() {
-		TopicPartitionOffset[] topicPartitionsToAssign = getTopicPartitionsToAssign();
-		return topicPartitionsToAssign != null
-				? Arrays.stream(topicPartitionsToAssign)
-				.map(org.springframework.kafka.support.TopicPartitionInitialOffset::fromTPO)
-				.toArray(org.springframework.kafka.support.TopicPartitionInitialOffset[]::new)
-				: null;
 	}
 
 	public AckMode getAckMode() {
@@ -441,10 +435,12 @@ public class ContainerProperties extends ConsumerProperties {
 	}
 
 	/**
-	 * Set the transaction manager to start a transaction; only {@link AckMode#RECORD} and
-	 * {@link AckMode#BATCH} (default) are supported with transactions.
+	 * Set the transaction manager to start a transaction; offsets are committed with
+	 * semantics equivalent to {@link AckMode#RECORD} and {@link AckMode#BATCH} depending
+	 * on the listener type (record or batch).
 	 * @param transactionManager the transaction manager.
 	 * @since 1.3
+	 * @see #setAckMode(AckMode)
 	 */
 	public void setTransactionManager(PlatformTransactionManager transactionManager) {
 		this.transactionManager = transactionManager;
@@ -535,40 +531,6 @@ public class ContainerProperties extends ConsumerProperties {
 	}
 
 	/**
-	 * Get the consumer properties that will be merged with the consumer properties
-	 * provided by the consumer factory; properties here will supersede any with the same
-	 * name(s) in the consumer factory.
-	 * {@code group.id} and {@code client.id} are ignored.
-	 * @return the properties.
-	 * @since 2.2.4
-	 * @see org.apache.kafka.clients.consumer.ConsumerConfig
-	 * @see #setGroupId(String)
-	 * @see #setClientId(String)
-	 * @deprecated in favor of {@link #getKafkaConsumerProperties()}.
-	 */
-	@Deprecated
-	public Properties getConsumerProperties() {
-		return getKafkaConsumerProperties();
-	}
-
-	/**
-	 * Set the consumer properties that will be merged with the consumer properties
-	 * provided by the consumer factory; properties here will supersede any with the same
-	 * name(s) in the consumer factory.
-	 * {@code group.id} and {@code client.id} are ignored.
-	 * @param consumerProperties the properties.
-	 * @since 2.2.4
-	 * @see org.apache.kafka.clients.consumer.ConsumerConfig
-	 * @see #setGroupId(String)
-	 * @see #setClientId(String)
-	 * @deprecated in favor of {@link #setKafkaConsumerProperties(Properties)}.
-	 */
-	@Deprecated
-	public void setConsumerProperties(Properties consumerProperties) {
-		setKafkaConsumerProperties(consumerProperties);
-	}
-
-	/**
 	 * The sleep interval in milliseconds used in the main loop between
 	 * {@link org.apache.kafka.clients.consumer.Consumer#poll(Duration)} calls.
 	 * Defaults to {@code 0} - no idling.
@@ -625,7 +587,22 @@ public class ContainerProperties extends ConsumerProperties {
 		this.consumerStartTimout = consumerStartTimout;
 	}
 
+	/**
+	 * Return whether to split batches by partition.
+	 * @return subBatchPerPartition.
+	 * @since 2.3.2
+	 */
 	public boolean isSubBatchPerPartition() {
+		return this.subBatchPerPartition == null ? false : this.subBatchPerPartition;
+	}
+
+	/**
+	 * Return whether to split batches by partition; null if not set.
+	 * @return subBatchPerPartition.
+	 * @since 2.5
+	 */
+	@Nullable
+	public Boolean getSubBatchPerPartition() {
 		return this.subBatchPerPartition;
 	}
 
@@ -634,7 +611,9 @@ public class ContainerProperties extends ConsumerProperties {
 	 * a transaction for each sub batch if transactions are in use) or the complete batch
 	 * received by the {@code poll()}. Useful when using transactions to enable zombie
 	 * fencing, by using a {@code transactional.id} that is unique for each
-	 * group/topic/partition.
+	 * group/topic/partition. Defaults to true when using transactions with
+	 * {@link #setEosMode(EOSMode) EOSMode.ALPHA} and false when not using transactions or
+	 * with {@link #setEosMode(EOSMode) EOSMode.BETA}.
 	 * @param subBatchPerPartition true for a separate transaction for each partition.
 	 * @since 2.3.2
 	 */
@@ -647,14 +626,60 @@ public class ContainerProperties extends ConsumerProperties {
 	}
 
 	/**
-	 * Set the assignment commit option. Default {@link AssignmentCommitOption#ALWAYS}.
-	 * In a future release it will default to {@link AssignmentCommitOption#LATEST_ONLY}.
+	 * Set the assignment commit option. Default
+	 * {@link AssignmentCommitOption#LATEST_ONLY_NO_TX}.
 	 * @param assignmentCommitOption the option.
 	 * @since 2.3.6
 	 */
 	public void setAssignmentCommitOption(AssignmentCommitOption assignmentCommitOption) {
 		Assert.notNull(assignmentCommitOption, "'assignmentCommitOption' cannot be null");
 		this.assignmentCommitOption = assignmentCommitOption;
+	}
+
+	public boolean isDeliveryAttemptHeader() {
+		return this.deliveryAttemptHeader;
+	}
+
+	/**
+	 * Set to true to populate the {@link KafkaHeaders#DELIVERY_ATTEMPT} header when the
+	 * error handler or after rollback processor implements {@code DeliveryAttemptAware}.
+	 * There is a small overhead so this is false by default.
+	 * @param deliveryAttemptHeader true to populate
+	 * @since 2.5
+	 */
+	public void setDeliveryAttemptHeader(boolean deliveryAttemptHeader) {
+		this.deliveryAttemptHeader = deliveryAttemptHeader;
+	}
+
+	/**
+	 * Get the exactly once semantics mode.
+	 * @return the mode.
+	 * @since 2.5
+	 * @see #setEosMode(EOSMode)
+	 */
+	public EOSMode getEosMode() {
+		return this.eosMode;
+	}
+
+	/**
+	 * Set the exactly once semantics mode. When {@link EOSMode#ALPHA} a producer per
+	 * group/topic/partition is used (enabling 'transactional.id fencing`).
+	 * {@link EOSMode#BETA} enables fetch-offset-request fencing, and requires brokers 2.5
+	 * or later. In the 2.6 client, the default will be BETA because the 2.6 client can
+	 * automatically fall back to ALPHA.
+	 * @param eosMode the mode; default ALPHA.
+	 * @since 2.5
+	 */
+	public void setEosMode(EOSMode eosMode) {
+		if (eosMode == null) {
+			this.eosMode = EOSMode.ALPHA;
+		}
+		else {
+			this.eosMode = eosMode;
+		}
+		if (this.eosMode.equals(EOSMode.BETA) && this.subBatchPerPartition == null) {
+			this.subBatchPerPartition = false;
+		}
 	}
 
 	@Override
@@ -679,6 +704,9 @@ public class ContainerProperties extends ConsumerProperties {
 				+ (this.scheduler != null ? ", scheduler=" + this.scheduler : "")
 				+ ", noPollThreshold=" + this.noPollThreshold
 				+ ", subBatchPerPartition=" + this.subBatchPerPartition
+				+ ", assignmentCommitOption=" + this.assignmentCommitOption
+				+ ", deliveryAttemptHeader=" + this.deliveryAttemptHeader
+				+ ", eosMode=" + this.eosMode
 				+ "]";
 	}
 

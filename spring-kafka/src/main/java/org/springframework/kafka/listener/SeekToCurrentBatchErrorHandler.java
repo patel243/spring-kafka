@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 the original author or authors.
+ * Copyright 2017-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,14 +27,15 @@ import org.springframework.util.backoff.BackOff;
 import org.springframework.util.backoff.BackOffExecution;
 
 /**
- * An error handler that seeks to the current offset for each topic in batch of records.
+ * An error handler that seeks to the current offset for each topic in a batch of records.
  * Used to rewind partitions after a message failure so that the batch can be replayed.
  *
  * @author Gary Russell
  * @since 2.1
  *
  */
-public class SeekToCurrentBatchErrorHandler implements ContainerAwareBatchErrorHandler {
+public class SeekToCurrentBatchErrorHandler extends KafkaExceptionLogLevelAware
+		implements ContainerAwareBatchErrorHandler {
 
 	private final ThreadLocal<BackOffExecution> backOffs = new ThreadLocal<>(); // Intentionally not static
 
@@ -88,7 +89,7 @@ public class SeekToCurrentBatchErrorHandler implements ContainerAwareBatchErrorH
 			}
 		}
 
-		throw new KafkaException("Seek to current after exception", thrownException);
+		throw new KafkaException("Seek to current after exception", getLogLevel(), thrownException);
 	}
 
 	@Override

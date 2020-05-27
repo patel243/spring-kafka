@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 
+import org.springframework.kafka.core.KafkaOperations;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.SeekUtils;
 import org.springframework.lang.Nullable;
 import org.springframework.util.backoff.BackOff;
 
@@ -48,7 +48,7 @@ import org.springframework.util.backoff.BackOff;
  */
 public class DefaultAfterRollbackProcessor<K, V> extends FailedRecordProcessor implements AfterRollbackProcessor<K, V> {
 
-	private KafkaTemplate<K, V> kafkaTemplate;
+	private KafkaOperations<K, V> kafkaTemplate;
 
 	/**
 	 * Construct an instance with the default recoverer which simply logs the record after
@@ -58,24 +58,6 @@ public class DefaultAfterRollbackProcessor<K, V> extends FailedRecordProcessor i
 	 */
 	public DefaultAfterRollbackProcessor() {
 		this(null, SeekUtils.DEFAULT_BACK_OFF);
-	}
-
-	/**
-	 * Construct an instance with the default recoverer which simply logs the record after
-	 * 'maxFailures' have occurred for a topic/partition/offset.
-	 * @param maxFailures the maxFailures; a negative value is treated as infinity.
-	 * @deprecated in favor of {@link #DefaultAfterRollbackProcessor(BackOff)}.
-	 * <b>IMPORTANT</b> When using a
-	 * {@link org.springframework.util.backoff.FixedBackOff}, the maxAttempts property
-	 * represents retries (one less than maxFailures). To retry indefinitely, use a fixed
-	 * or exponential {@link BackOff} configured appropriately. To use the other
-	 * constructor with the semantics of this one, with maxFailures equal to 3, use
-	 * {@code new DefaultAfterRollbackProcessor(new FixedBackOff(0L, 2L)}.
-	 * @since 2.2.1
-	 */
-	@Deprecated
-	public DefaultAfterRollbackProcessor(int maxFailures) {
-		this(null, maxFailures);
 	}
 
 	/**
@@ -97,28 +79,6 @@ public class DefaultAfterRollbackProcessor<K, V> extends FailedRecordProcessor i
 	 */
 	public DefaultAfterRollbackProcessor(BiConsumer<ConsumerRecord<?, ?>, Exception> recoverer) {
 		this(recoverer, SeekUtils.DEFAULT_BACK_OFF);
-	}
-
-	/**
-	 * Construct an instance with the provided recoverer which will be called after
-	 * maxFailures have occurred for a topic/partition/offset.
-	 * @param recoverer the recoverer; if null, the default (logging) recoverer is used.
-	 * @param maxFailures the maxFailures; a negative value is treated as infinity.
-	 * @deprecated in favor of {@link #DefaultAfterRollbackProcessor(BackOff)}.
-	 * <b>IMPORTANT</b> When using a
-	 * {@link org.springframework.util.backoff.FixedBackOff}, the maxAttempts property
-	 * represents retries (one less than maxFailures). To retry indefinitely, use a fixed
-	 * or exponential {@link BackOff} configured appropriately. To use the other
-	 * constructor with the semantics of this one, with maxFailures equal to 3, use
-	 * {@code new DefaultAfterRollbackProcessor(recoverer, new FixedBackOff(0L, 2L)}.
-	 * @since 2.2
-	 */
-	@Deprecated
-	public DefaultAfterRollbackProcessor(@Nullable BiConsumer<ConsumerRecord<?, ?>, Exception> recoverer,
-			int maxFailures) {
-
-		// Remove super CTOR when this is removed.
-		super(recoverer, maxFailures);
 	}
 
 	/**
@@ -159,12 +119,12 @@ public class DefaultAfterRollbackProcessor<K, V> extends FailedRecordProcessor i
 	 * Set to true and the container will run the
 	 * {@link #process(List, Consumer, Exception, boolean)} method in a transaction and,
 	 * if a record is skipped and recovered, we will send its offset to the transaction.
-	 * Requires a {@link KafkaTemplate}.
+	 * Requires a {@link KafkaOperations}.
 	 * @param commitRecovered true to process in a transaction.
 	 * @since 2.3
 	 * @see #isProcessInTransaction()
 	 * @see #process(List, Consumer, Exception, boolean)
-	 * @see #setKafkaTemplate(KafkaTemplate)
+	 * @see #setKafkaOperations(KafkaOperations)
 	 */
 	@Override
 	public void setCommitRecovered(boolean commitRecovered) { // NOSONAR enhanced javadoc
@@ -174,12 +134,25 @@ public class DefaultAfterRollbackProcessor<K, V> extends FailedRecordProcessor i
 	/**
 	 * Set a {@link KafkaTemplate} to use to send the offset of a recovered record
 	 * to a transaction.
-	 * @param kafkaTemplate the template
+	 * @param kafkaTemplate the template.
 	 * @since 2.2.5
 	 * @see #setCommitRecovered(boolean)
+	 * @deprecated in favor of {@link #setKafkaOperations(KafkaOperations)}.
 	 */
+	@Deprecated
 	public void setKafkaTemplate(KafkaTemplate<K, V> kafkaTemplate) {
 		this.kafkaTemplate = kafkaTemplate;
+	}
+
+	/**
+	 * Set a {@link KafkaOperations} to use to send the offset of a recovered record
+	 * to a transaction.
+	 * @param kafkaOperations the operations.
+	 * @since 2.5.1
+	 * @see #setCommitRecovered(boolean)
+	 */
+	public void setKafkaOperations(KafkaOperations<K, V> kafkaOperations) {
+		this.kafkaTemplate = kafkaOperations;
 	}
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,13 +24,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.KafkaException.Level;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.config.KafkaListenerContainerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
@@ -87,7 +87,7 @@ public class StatefulRetryTests {
 			ConcurrentKafkaListenerContainerFactory<Integer, String> factory =
 					new ConcurrentKafkaListenerContainerFactory<>();
 			factory.setConsumerFactory(consumerFactory(embeddedKafka));
-			factory.setErrorHandler(new SeekToCurrentErrorHandler() {
+			SeekToCurrentErrorHandler errorHandler = new SeekToCurrentErrorHandler() {
 
 				@Override
 				public void handle(Exception thrownException, List<ConsumerRecord<?, ?>> records,
@@ -96,7 +96,9 @@ public class StatefulRetryTests {
 					super.handle(thrownException, records, consumer, container);
 				}
 
-			});
+			};
+			errorHandler.setLogLevel(Level.INFO);
+			factory.setErrorHandler(errorHandler);
 			factory.setStatefulRetry(true);
 			factory.setRetryTemplate(new RetryTemplate());
 			factory.setRecoveryCallback(c -> {
@@ -115,7 +117,6 @@ public class StatefulRetryTests {
 		public Map<String, Object> consumerConfigs(EmbeddedKafkaBroker embeddedKafka) {
 			Map<String, Object> consumerProps =
 					KafkaTestUtils.consumerProps(DEFAULT_TEST_GROUP_ID, "false", embeddedKafka);
-			consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 			return consumerProps;
 		}
 

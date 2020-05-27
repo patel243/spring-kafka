@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 the original author or authors.
+ * Copyright 2019-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import java.time.Duration;
@@ -42,9 +43,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.common.TopicPartition;
@@ -58,6 +61,7 @@ import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.event.ConsumerFailedToStartEvent;
 import org.springframework.kafka.event.ConsumerStartedEvent;
 import org.springframework.kafka.event.ConsumerStartingEvent;
+import org.springframework.kafka.listener.ContainerProperties.AssignmentCommitOption;
 import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.kafka.transaction.KafkaAwareTransactionManager;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -392,17 +396,29 @@ public class ConcurrentMessageListenerContainerMockTests {
 	@Test
 	@DisplayName("Intercept after tx start")
 	void testInterceptAfterTx() throws InterruptedException {
-		testIntercept(false);
+		testIntercept(false, AssignmentCommitOption.ALWAYS);
 	}
 
 	@Test
 	@DisplayName("Intercept before tx start")
 	void testInterceptBeforeTx() throws InterruptedException {
-		testIntercept(true);
+		testIntercept(true, AssignmentCommitOption.ALWAYS);
+	}
+
+	@Test
+	@DisplayName("Intercept after tx start no initial commit")
+	void testInterceptAfterTx1() throws InterruptedException {
+		testIntercept(false, null);
+	}
+
+	@Test
+	@DisplayName("Intercept before tx start no initial commit")
+	void testInterceptBeforeTx1() throws InterruptedException {
+		testIntercept(true, null);
 	}
 
 	@SuppressWarnings({ "rawtypes", "unchecked" })
-	void testIntercept(boolean beforeTx) throws InterruptedException {
+	void testIntercept(boolean beforeTx, AssignmentCommitOption option) throws InterruptedException {
 		ConsumerFactory consumerFactory = mock(ConsumerFactory.class);
 		final Consumer consumer = mock(Consumer.class);
 		TopicPartition tp0 = new TopicPartition("foo", 0);
@@ -427,6 +443,9 @@ public class ConcurrentMessageListenerContainerMockTests {
 		containerProperties.setGroupId("grp");
 		containerProperties.setMessageListener((MessageListener) rec -> { });
 		containerProperties.setMissingTopicsFatal(false);
+		if (option != null) {
+			containerProperties.setAssignmentCommitOption(option);
+		}
 		KafkaAwareTransactionManager tm = mock(KafkaAwareTransactionManager.class);
 		ProducerFactory pf = mock(ProducerFactory.class);
 		given(tm.getProducerFactory()).willReturn(pf);
@@ -434,7 +453,7 @@ public class ConcurrentMessageListenerContainerMockTests {
 		given(pf.createProducer()).willReturn(producer);
 		containerProperties.setTransactionManager(tm);
 		List<String> order = new ArrayList<>();
-		CountDownLatch latch = new CountDownLatch(3);
+		CountDownLatch latch = new CountDownLatch(option == null ? 2 : 3);
 		willAnswer(inv -> {
 			order.add("tx");
 			TransactionSynchronizationManager.bindResource(pf,
@@ -454,14 +473,114 @@ public class ConcurrentMessageListenerContainerMockTests {
 		try {
 			assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
 			if (beforeTx) {
-				assertThat(order).containsExactly("tx", "interceptor", "tx"); // first one is on assignment
+				if (option == null) {
+					assertThat(order).containsExactly("interceptor", "tx");
+				}
+				else {
+					assertThat(order).containsExactly("tx", "interceptor", "tx"); // first one is on assignment
+				}
 			}
 			else {
-				assertThat(order).containsExactly("tx", "tx", "interceptor");
+				if (option == null) {
+					assertThat(order).containsExactly("tx", "interceptor");
+				}
+				else {
+					assertThat(order).containsExactly("tx", "tx", "interceptor");
+				}
 			}
 		}
 		finally {
 			container.stop();
+		}
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	@Test
+	void testNoCommitOnAssignmentWithEarliest() throws InterruptedException {
+		Consumer consumer = mock(Consumer.class);
+		ConsumerRecords records = new ConsumerRecords<>(Collections.emptyMap());
+		CountDownLatch latch = new CountDownLatch(1);
+		willAnswer(inv -> {
+			latch.countDown();
+			Thread.sleep(50);
+			return records;
+		}).given(consumer).poll(any());
+		TopicPartition tp0 = new TopicPartition("foo", 0);
+		List<TopicPartition> assignments = Arrays.asList(tp0);
+		willAnswer(invocation -> {
+			((ConsumerRebalanceListener) invocation.getArgument(1))
+				.onPartitionsAssigned(assignments);
+			return null;
+		}).given(consumer).subscribe(any(Collection.class), any());
+		ConsumerFactory cf = mock(ConsumerFactory.class);
+		given(cf.createConsumer(any(), any(), any(), any())).willReturn(consumer);
+		given(cf.getConfigurationProperties())
+				.willReturn(Collections.singletonMap(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"));
+		ContainerProperties containerProperties = new ContainerProperties("foo");
+		containerProperties.setGroupId("grp");
+		containerProperties.setMessageListener((MessageListener) rec -> { });
+		containerProperties.setMissingTopicsFatal(false);
+		containerProperties.setAssignmentCommitOption(AssignmentCommitOption.LATEST_ONLY);
+		ConcurrentMessageListenerContainer container = new ConcurrentMessageListenerContainer(cf,
+				containerProperties);
+		container.start();
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		verify(consumer, never()).commitSync(any(), any());
+	}
+
+	@Test
+	void testNoInitialCommitIfAlreadyCommitted() throws InterruptedException {
+		testInitialCommitIBasedOnCommitted(true);
+	}
+
+	@Test
+	void testInitialCommitIfNotAlreadyCommitted() throws InterruptedException {
+		testInitialCommitIBasedOnCommitted(false);
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	private void testInitialCommitIBasedOnCommitted(boolean committed) throws InterruptedException {
+		Consumer consumer = mock(Consumer.class);
+		ConsumerRecords records = new ConsumerRecords<>(Collections.emptyMap());
+		CountDownLatch latch = new CountDownLatch(1);
+		willAnswer(inv -> {
+			latch.countDown();
+			Thread.sleep(50);
+			return records;
+		}).given(consumer).poll(any());
+		TopicPartition tp0 = new TopicPartition("foo", 0);
+		List<TopicPartition> assignments = Arrays.asList(tp0);
+		willAnswer(invocation -> {
+			((ConsumerRebalanceListener) invocation.getArgument(1))
+				.onPartitionsAssigned(assignments);
+			return null;
+		}).given(consumer).subscribe(any(Collection.class), any());
+		if (committed) {
+			given(consumer.committed(Collections.singleton(tp0)))
+					.willReturn(Collections.singletonMap(tp0, new OffsetAndMetadata(0L)));
+		}
+		else {
+			given(consumer.committed(Collections.singleton(tp0)))
+					.willReturn(Collections.singletonMap(tp0, null));
+		}
+		ConsumerFactory cf = mock(ConsumerFactory.class);
+		given(cf.createConsumer(any(), any(), any(), any())).willReturn(consumer);
+		given(cf.getConfigurationProperties())
+				.willReturn(Collections.singletonMap(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest"));
+		ContainerProperties containerProperties = new ContainerProperties("foo");
+		containerProperties.setGroupId("grp");
+		containerProperties.setMessageListener((MessageListener) rec -> { });
+		containerProperties.setMissingTopicsFatal(false);
+		containerProperties.setAssignmentCommitOption(AssignmentCommitOption.LATEST_ONLY);
+		ConcurrentMessageListenerContainer container = new ConcurrentMessageListenerContainer(cf,
+				containerProperties);
+		container.start();
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		if (committed) {
+			verify(consumer, never()).commitSync(any(), any());
+		}
+		else {
+			verify(consumer).commitSync(any(), any());
 		}
 	}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,10 @@ package org.springframework.kafka.core;
 
 import static org.assertj.core.api.Assertions.allOf;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.mock;
 import static org.springframework.kafka.test.assertj.KafkaConditions.key;
 import static org.springframework.kafka.test.assertj.KafkaConditions.keyValue;
@@ -25,7 +29,9 @@ import static org.springframework.kafka.test.assertj.KafkaConditions.partition;
 import static org.springframework.kafka.test.assertj.KafkaConditions.timestamp;
 import static org.springframework.kafka.test.assertj.KafkaConditions.value;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -34,17 +40,21 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.assertj.core.api.Assertions;
@@ -52,6 +62,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.kafka.support.CompositeProducerListener;
 import org.springframework.kafka.support.DefaultKafkaHeaderMapper;
@@ -68,6 +79,7 @@ import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.util.concurrent.ListenableFuture;
 import org.springframework.util.concurrent.ListenableFutureCallback;
+import org.springframework.util.concurrent.SettableListenableFuture;
 
 /**
  * @author Gary Russell
@@ -92,7 +104,6 @@ public class KafkaTemplateTests {
 		embeddedKafka = EmbeddedKafkaCondition.getBroker();
 		Map<String, Object> consumerProps = KafkaTestUtils
 				.consumerProps("KafkaTemplatetests" + UUID.randomUUID().toString(), "false", embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
 		consumer = cf.createConsumer();
 		embeddedKafka.consumeFromAnEmbeddedTopic(consumer, INT_KEY_TOPIC);
@@ -104,7 +115,7 @@ public class KafkaTemplateTests {
 	}
 
 	@Test
-	public void testTemplate() {
+	void testTemplate() {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf, true);
@@ -152,7 +163,7 @@ public class KafkaTemplateTests {
 	}
 
 	@Test
-	public void testTemplateWithTimestamps() {
+	void testTemplateWithTimestamps() {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf, true);
@@ -180,7 +191,7 @@ public class KafkaTemplateTests {
 	}
 
 	@Test
-	public void testWithMessage() {
+	void testWithMessage() {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf, true);
@@ -239,7 +250,7 @@ public class KafkaTemplateTests {
 	}
 
 	@Test
-	public void withListener() throws Exception {
+	void withListener() throws Exception {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf);
@@ -285,7 +296,7 @@ public class KafkaTemplateTests {
 	}
 
 	@Test
-	public void withProducerRecordListener() throws Exception {
+	void withProducerRecordListener() throws Exception {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf);
@@ -309,9 +320,9 @@ public class KafkaTemplateTests {
 	}
 
 	@Test
-	public void testWithCallback() throws Exception {
+	void testWithCallback() throws Exception {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
-		ProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
+		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf, true);
 		template.setDefaultTopic(INT_KEY_TOPIC);
 		ListenableFuture<SendResult<Integer, String>> future = template.sendDefault("foo");
@@ -333,18 +344,76 @@ public class KafkaTemplateTests {
 		});
 		assertThat(KafkaTestUtils.getSingleRecord(consumer, INT_KEY_TOPIC)).has(value("foo"));
 		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
-		pf.createProducer().close();
+		pf.destroy();
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void testWithCallbackFailure() throws Exception {
+		Producer<Integer, String> producer = mock(Producer.class);
+		willAnswer(inv -> {
+			Callback callback = inv.getArgument(1);
+			callback.onCompletion(null, new RuntimeException("test"));
+			return new SettableListenableFuture<RecordMetadata>();
+		}).given(producer).send(any(), any());
+		ProducerFactory<Integer, String> pf = mock(ProducerFactory.class);
+		given(pf.createProducer()).willReturn(producer);
+		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf);
+		ListenableFuture<SendResult<Integer, String>> future = template.send("foo", 1, "bar");
+		final CountDownLatch latch = new CountDownLatch(1);
+		final AtomicReference<SendResult<Integer, String>> theResult = new AtomicReference<>();
+		AtomicReference<String> value = new AtomicReference<>();
+		future.addCallback(new KafkaSendCallback<Integer, String>() {
+
+			@Override
+			public void onSuccess(SendResult<Integer, String> result) {
+			}
+
+			@Override
+			public void onFailure(KafkaProducerException ex) {
+				ProducerRecord<Integer, String> failed = ex.getFailedProducerRecord();
+				value.set(failed.value());
+				latch.countDown();
+			}
+
+		});
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(value.get()).isEqualTo("bar");
+	}
+
+	@SuppressWarnings("unchecked")
+	@Test
+	void testWithCallbackFailureFunctional() throws Exception {
+		Producer<Integer, String> producer = mock(Producer.class);
+		willAnswer(inv -> {
+			Callback callback = inv.getArgument(1);
+			callback.onCompletion(null, new RuntimeException("test"));
+			return new SettableListenableFuture<RecordMetadata>();
+		}).given(producer).send(any(), any());
+		ProducerFactory<Integer, String> pf = mock(ProducerFactory.class);
+		given(pf.createProducer()).willReturn(producer);
+		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf);
+		ListenableFuture<SendResult<Integer, String>> future = template.send("foo", 1, "bar");
+		final CountDownLatch latch = new CountDownLatch(1);
+		final AtomicReference<SendResult<Integer, String>> theResult = new AtomicReference<>();
+		AtomicReference<String> value = new AtomicReference<>();
+		future.addCallback(result -> { }, (KafkaFailureCallback<Integer, String>) ex -> {
+			ProducerRecord<Integer, String> failed = ex.getFailedProducerRecord();
+			value.set(failed.value());
+			latch.countDown();
+		});
+		assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(value.get()).isEqualTo("bar");
 	}
 
 	@Test
-	public void testTemplateDisambiguation() {
+	void testTemplateDisambiguation() {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<String, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
 		pf.setKeySerializer(new StringSerializer());
 		KafkaTemplate<String, String> template = new KafkaTemplate<>(pf, true);
 		template.setDefaultTopic(STRING_KEY_TOPIC);
 		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps("testTString", "false", embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		DefaultKafkaConsumerFactory<String, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
 		cf.setKeyDeserializer(new StringDeserializer());
 		Consumer<String, String> localConsumer = cf.createConsumer();
@@ -355,6 +424,52 @@ public class KafkaTemplateTests {
 		assertThat(record).has(Assertions.<ConsumerRecord<String, String>>allOf(key("foo"), value("bar")));
 		localConsumer.close();
 		pf.createProducer().close();
+		pf.destroy();
+	}
+
+	@Test
+	void testConfigOverrides() {
+		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
+		DefaultKafkaProducerFactory<String, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
+		pf.setPhysicalCloseTimeout(6);
+		pf.setProducerPerConsumerPartition(false);
+		pf.setProducerPerThread(true);
+		Map<String, Object> overrides = new HashMap<>();
+		overrides.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+		KafkaTemplate<String, String> template = new KafkaTemplate<>(pf, true, overrides);
+		assertThat(template.getProducerFactory().getConfigurationProperties()
+				.get(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG)).isEqualTo(StringSerializer.class);
+		assertThat(template.getProducerFactory().getPhysicalCloseTimeout()).isEqualTo(Duration.ofSeconds(6));
+		assertThat(template.getProducerFactory().isProducerPerConsumerPartition()).isFalse();
+		assertThat(template.getProducerFactory().isProducerPerThread()).isTrue();
+	}
+
+	@Test
+	void testConfigOverridesWithSerializers() {
+		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
+		Supplier<Serializer<String>> keySerializer = () -> null;
+		Supplier<Serializer<String>> valueSerializer = () -> null;
+		DefaultKafkaProducerFactory<String, String> pf =
+				new DefaultKafkaProducerFactory<>(senderProps, keySerializer, valueSerializer);
+		Map<String, Object> overrides = new HashMap<>();
+		overrides.put(ProducerConfig.CLIENT_ID_CONFIG, "foo");
+		KafkaTemplate<String, String> template = new KafkaTemplate<>(pf, true, overrides);
+		assertThat(template.getProducerFactory().getConfigurationProperties()
+				.get(ProducerConfig.CLIENT_ID_CONFIG)).isEqualTo("foo");
+		assertThat(template.getProducerFactory().getKeySerializerSupplier()).isSameAs(keySerializer);
+		assertThat(template.getProducerFactory().getValueSerializerSupplier()).isSameAs(valueSerializer);
+	}
+
+	@Test
+	void testFutureFailureOnSend() {
+		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
+		senderProps.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 10);
+		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
+		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf, true);
+
+		assertThatExceptionOfType(KafkaException.class).isThrownBy(() ->
+			template.send("missing.topic", "foo"))
+				.withCauseExactlyInstanceOf(TimeoutException.class);
 		pf.destroy();
 	}
 

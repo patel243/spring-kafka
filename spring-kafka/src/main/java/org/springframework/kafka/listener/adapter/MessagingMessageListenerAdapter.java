@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -119,6 +119,8 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 	private KafkaTemplate replyTemplate;
 
 	private boolean hasAckParameter;
+
+	private boolean hasMetadataParameter;
 
 	private boolean messageReturnType;
 
@@ -318,12 +320,19 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 	 */
 	protected final Object invokeHandler(Object data, Acknowledgment acknowledgment, Message<?> message,
 			Consumer<?, ?> consumer) {
+
 		try {
 			if (data instanceof List && !this.isConsumerRecordList) {
 				return this.handlerMethod.invoke(message, acknowledgment, consumer);
 			}
 			else {
-				return this.handlerMethod.invoke(message, data, acknowledgment, consumer);
+				if (this.hasMetadataParameter) {
+					return this.handlerMethod.invoke(message, data, acknowledgment, consumer,
+							AdapterUtils.buildConsumerRecordMetadata(data));
+				}
+				else {
+					return this.handlerMethod.invoke(message, data, acknowledgment, consumer);
+				}
 			}
 		}
 		catch (org.springframework.messaging.converter.MessageConversionException ex) {
@@ -403,18 +412,6 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 	 *
 	 * @param result the result.
 	 * @param topic the topic.
-	 * @deprecated in favor of {@link #sendResponse(Object, String, Object, boolean)}.
-	 */
-	@Deprecated
-	protected void sendResponse(Object result, String topic) {
-		sendResponse(result, topic, null, false);
-	}
-
-	/**
-	 * Send the result to the topic.
-	 *
-	 * @param result the result.
-	 * @param topic the topic.
 	 * @param source the source (input).
 	 * @param returnTypeMessage true if we are returning message(s).
 	 * @since 2.1.3
@@ -425,7 +422,8 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 			this.logger.debug(() -> "No replyTopic to handle the reply: " + result);
 		}
 		else if (result instanceof Message) {
-			this.replyTemplate.send((Message<?>) result);
+			Message<?> reply = checkHeaders(result, topic, source);
+			this.replyTemplate.send(reply);
 		}
 		else {
 			if (result instanceof Iterable) {
@@ -452,6 +450,31 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 				sendSingleResult(result, topic, source);
 			}
 		}
+	}
+
+	private Message<?> checkHeaders(Object result, String topic, Object source) { // NOSONAR (complexity)
+		Message<?> reply = (Message<?>) result;
+		MessageHeaders headers = reply.getHeaders();
+		boolean needsTopic = headers.get(KafkaHeaders.TOPIC) == null;
+		boolean sourceIsMessage = source instanceof Message;
+		boolean needsCorrelation = headers.get(KafkaHeaders.CORRELATION_ID) == null && sourceIsMessage;
+		boolean needsPartition = headers.get(KafkaHeaders.PARTITION_ID) == null && sourceIsMessage
+				&& getReplyPartition((Message<?>) source) != null;
+		if (needsTopic || needsCorrelation || needsPartition) {
+			MessageBuilder<?> builder = MessageBuilder.fromMessage(reply);
+			if (needsTopic) {
+				builder.setHeader(KafkaHeaders.TOPIC, topic);
+			}
+			if (needsCorrelation && sourceIsMessage) {
+				builder.setHeader(KafkaHeaders.CORRELATION_ID,
+						((Message<?>) source).getHeaders().get(KafkaHeaders.CORRELATION_ID));
+			}
+			if (sourceIsMessage && reply.getHeaders().get(KafkaHeaders.REPLY_PARTITION) == null) {
+				setPartition(builder, (Message<?>) source);
+			}
+			reply = builder.build();
+		}
+		return reply;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -499,11 +522,16 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 		this.replyTemplate.send(builder.build());
 	}
 
-	private void setPartition(MessageBuilder<Object> builder, Message<?> source) {
-		byte[] partitionBytes = source.getHeaders().get(KafkaHeaders.REPLY_PARTITION, byte[].class);
+	private void setPartition(MessageBuilder<?> builder, Message<?> source) {
+		byte[] partitionBytes = getReplyPartition(source);
 		if (partitionBytes != null) {
 			builder.setHeader(KafkaHeaders.PARTITION_ID, ByteBuffer.wrap(partitionBytes).getInt());
 		}
+	}
+
+	@Nullable
+	private byte[] getReplyPartition(Message<?> source) {
+		return source.getHeaders().get(KafkaHeaders.REPLY_PARTITION, byte[].class);
 	}
 
 	protected final String createMessagingErrorMessage(String description, Object payload) {
@@ -542,6 +570,9 @@ public abstract class MessagingMessageListenerAdapter<K, V> implements ConsumerS
 			isNotConvertible |= isAck;
 			boolean isConsumer = parameterIsType(parameterType, Consumer.class);
 			isNotConvertible |= isConsumer;
+			boolean isMeta = parameterIsType(parameterType, ConsumerRecordMetadata.class);
+			this.hasMetadataParameter |= isMeta;
+			isNotConvertible |= isMeta;
 			if (isNotConvertible) {
 				notConvertibleParameters++;
 			}

@@ -55,8 +55,8 @@ compile 'org.springframework.kafka:spring-kafka'
 
 This quick tour works with the following versions:
 
-* Apache Kafka Clients 2.2.0
-* Spring Framework 5.2.x
+* Apache Kafka Clients 2.4.1
+* Spring Framework 5.3.x
 * Minimum Java version: 8
 
 ==== A Very, Very Quick Example
@@ -85,7 +85,7 @@ public void testAutoCommit() throws Exception {
     container.start();
     Thread.sleep(1000); // wait a bit for the container to start
     KafkaTemplate<Integer, String> template = createTemplate();
-    template.setDefaultTopic(topic1);
+    template.setDefaultTopic("topic1");
     template.sendDefault(0, "foo");
     template.sendDefault(2, "bar");
     template.sendDefault(0, "baz");

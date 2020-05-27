@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 the original author or authors.
+ * Copyright 2017-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willAnswer;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 
@@ -89,14 +88,9 @@ public class SubBatchPerPartitionTxTests {
 	@Autowired
 	private KafkaListenerEndpointRegistry registry;
 
-	/*
-	 * Deliver 6 records from three partitions, fail on the second record second
-	 * partition, first attempt; verify partition 0,1 committed and a total of 7 records
-	 * handled after seek.
-	 */
 	@SuppressWarnings("unchecked")
 	@Test
-	public void discardRemainingRecordsFromPollAndSeek() throws Exception {
+	public void threeTransactionsForThreeSubBatches() throws Exception {
 		assertThat(this.config.deliveryLatch.await(10, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.config.pollLatch.await(10, TimeUnit.SECONDS)).isTrue();
 		this.registry.stop();
@@ -119,8 +113,7 @@ public class SubBatchPerPartitionTxTests {
 		inOrder.verify(this.producer).beginTransaction();
 		inOrder.verify(this.producer).sendOffsetsToTransaction(offsets, CONTAINER_ID);
 		inOrder.verify(this.producer).commitTransaction();
-		inOrder.verify(this.consumer, atLeastOnce()).poll(Duration.ofMillis(ContainerProperties.DEFAULT_POLL_TIMEOUT));
-		assertThat(this.config.contents).contains("foo", "bar", "baz", "qux", "qux", "fiz", "buz");
+		assertThat(this.config.contents).containsExactly("foo", "bar", "baz", "qux", "fiz", "buz");
 		assertThat(this.config.transactionSuffix).isNotNull();
 	}
 
@@ -128,15 +121,15 @@ public class SubBatchPerPartitionTxTests {
 	@EnableKafka
 	public static class Config {
 
-		private final List<String> contents = new ArrayList<>();
+		final List<String> contents = new ArrayList<>();
 
-		private final CountDownLatch pollLatch = new CountDownLatch(2);
+		final CountDownLatch pollLatch = new CountDownLatch(2);
 
-		private final CountDownLatch deliveryLatch = new CountDownLatch(3);
+		final CountDownLatch deliveryLatch = new CountDownLatch(3);
 
-		private final CountDownLatch closeLatch = new CountDownLatch(1);
+		final CountDownLatch closeLatch = new CountDownLatch(1);
 
-		private volatile String transactionSuffix;
+		volatile String transactionSuffix;
 
 		@KafkaListener(id = CONTAINER_ID, topics = "foo")
 		public void foo(List<String> in) {
@@ -208,7 +201,6 @@ public class SubBatchPerPartitionTxTests {
 			factory.getContainerProperties().setAckMode(AckMode.BATCH);
 			factory.getContainerProperties().setTransactionManager(tm());
 			factory.setBatchListener(true);
-			factory.getContainerProperties().setSubBatchPerPartition(true);
 			return factory;
 		}
 
@@ -224,6 +216,7 @@ public class SubBatchPerPartitionTxTests {
 			ProducerFactory pf = mock(ProducerFactory.class);
 			given(pf.createProducer(isNull())).willReturn(producer());
 			given(pf.transactionCapable()).willReturn(true);
+			given(pf.isProducerPerConsumerPartition()).willReturn(true);
 			return pf;
 		}
 

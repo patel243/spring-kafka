@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 the original author or authors.
+ * Copyright 2017-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,26 +17,34 @@
 package org.springframework.kafka.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.mock;
 
 import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.Metric;
+import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.Test;
 
+import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.core.ConsumerFactory.Listener;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.KafkaMessageListenerContainer;
 import org.springframework.kafka.listener.MessageListener;
@@ -95,6 +103,25 @@ public class DefaultKafkaConsumerFactoryTests {
 				};
 		target.createConsumer(null, null, null, null);
 		assertThat(configPassedToKafkaConsumer).isEqualTo(originalConfig);
+	}
+
+	@Test
+	public void testBootstrapServersSupplier() {
+		Map<String, Object> originalConfig = Collections.emptyMap();
+		final Map<String, Object> configPassedToKafkaConsumer = new HashMap<>();
+		DefaultKafkaConsumerFactory<String, String> target =
+				new DefaultKafkaConsumerFactory<String, String>(originalConfig) {
+
+
+					@Override
+					protected Consumer<String, String> createRawConsumer(Map<String, Object> configProps) {
+						configPassedToKafkaConsumer.putAll(configProps);
+						return null;
+					}
+				};
+		target.setBootstrapServersSupplier(() -> "foo");
+		target.createConsumer(null, null, null, null);
+		assertThat(configPassedToKafkaConsumer.get(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG)).isEqualTo("foo");
 	}
 
 	@Test
@@ -306,7 +333,6 @@ public class DefaultKafkaConsumerFactoryTests {
 		pfTx.setTransactionIdPrefix("fooTx.");
 		KafkaTemplate<Integer, String> templateTx = new KafkaTemplate<>(pfTx);
 		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps("txCache1Group", "false", this.embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
 		ContainerProperties containerProps = new ContainerProperties("txCache1");
 		CountDownLatch latch = new CountDownLatch(1);
@@ -347,7 +373,6 @@ public class DefaultKafkaConsumerFactoryTests {
 		pfTx.setTransactionIdPrefix("fooTx.");
 		KafkaTemplate<Integer, String> templateTx = new KafkaTemplate<>(pfTx);
 		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps("txCache2Group", "false", this.embeddedKafka);
-		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
 		ContainerProperties containerProps = new ContainerProperties("txCache2");
 		CountDownLatch latch = new CountDownLatch(1);
@@ -365,14 +390,60 @@ public class DefaultKafkaConsumerFactoryTests {
 			ListenableFuture<SendResult<Integer, String>> future = template.send("txCache2", "foo");
 			future.get(10, TimeUnit.SECONDS);
 			assertThat(latch.await(30, TimeUnit.SECONDS)).isTrue();
-			assertThat(KafkaTestUtils.getPropertyValue(pfTx, "cache", Map.class)).hasSize(1);
-			assertThat((Queue) KafkaTestUtils.getPropertyValue(pfTx, "cache", Map.class).get("fooTx.")).hasSize(0);
+			assertThat(KafkaTestUtils.getPropertyValue(pfTx, "cache", Map.class)).hasSize(0);
 		}
 		finally {
 			container.stop();
 			pf.destroy();
 			pfTx.destroy();
 		}
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	@Test
+	void listener() {
+		Consumer consumer = mock(Consumer.class);
+		Map<MetricName, ? extends Metric> metrics = new HashMap<>();
+		metrics.put(new MetricName("test", "group", "desc", Collections.singletonMap("client-id", "foo-0")), null);
+		given(consumer.metrics()).willReturn(metrics);
+		DefaultKafkaConsumerFactory cf = new DefaultKafkaConsumerFactory(Collections.emptyMap()) {
+
+			@Override
+			protected Consumer createRawConsumer(Map configProps) {
+				return consumer;
+			}
+
+		};
+		List<String> adds = new ArrayList<>();
+		List<String> removals = new ArrayList<>();
+
+		Consumer consum = cf.createConsumer();
+		assertThat(AopUtils.isAopProxy(consum)).isFalse();
+		assertThat(adds).hasSize(0);
+
+		cf.addListener(new Listener() {
+
+			@Override
+			public void consumerAdded(String id, Consumer consumer) {
+				adds.add(id);
+			}
+
+			@Override
+			public void consumerRemoved(String id, Consumer consumer) {
+				removals.add(id);
+			}
+
+		});
+		cf.setBeanName("cf");
+
+		consum = cf.createConsumer();
+		assertThat(AopUtils.isAopProxy(consum)).isTrue();
+		assertThat(AopUtils.isJdkDynamicProxy(consum)).isTrue();
+		assertThat(adds).hasSize(1);
+		assertThat(adds.get(0)).isEqualTo("cf.foo-0");
+		assertThat(removals).hasSize(0);
+		consum.close();
+		assertThat(removals).hasSize(1);
 	}
 
 	@Configuration

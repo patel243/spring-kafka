@@ -1,63 +1,107 @@
-=== What's New in 2.4 Since 2.3
+=== What's New in 2.5 Since 2.4
 
-This section covers the changes made from version 2.3 to version 2.4.
+This section covers the changes made from version 2.4 to version 2.5.
+For changes in earlier version, see <<history>>.
 
 Also see <<new-in-sik>>.
 
-[[kafka-client-2.4]]
+[[x25-factory-listeners]]
+==== Consumer/Producer Factory Changes
+
+The default consumer and producer factories can now invoke a callback whenever a consumer or producer is created or closed.
+Implementations for native Micrometer metrics are provided.
+See <<factory-listeners>> for more information.
+
+You can now change bootstrap server properties at runtime, enabling failover to another Kafka cluster.
+See <<connecting>> for more information.
+
+[[x25-kafka-client]]
 ==== Kafka Client Version
 
-This version requires the 2.4.0 `kafka-clients` or higher and supports the new incremental rebalancing feature.
+This version requires the 2.5.0 `kafka-clients`.
 
-[[x24-carl]]
-==== ConsumerAwareRebalanceListener
+==== Class/Package Changes
 
-Like `ConsumerRebalanceListener`, this interface now has an additional method `onPartitionsLost`.
-Refer to the Apache Kafka documentation for more information.
+`SeekUtils` has been moved from the `o.s.k.support` package to `o.s.k.listener`.
 
-Unlike the `ConsumerRebalanceListener`, The default implementation does **not** call `onPartitionsRevoked`.
-Instead, the listener container will call that method after it has called `onPartitionsLost`; you should not, therefore, do the same when implementing `ConsumerAwareRebalanceListener`.
+[[x25-delivery]]
+==== Delivery Attempts Header
 
-See the IMPORTANT note at the end of <<rebalance-listeners>> for more information.
+There is now an option to to add a header which tracks delivery attempts when using certain error handlers and after rollback processors.
+See <<delivery-header>> for more information.
 
-[[x24-eh]]
-==== GenericErrorHandler
+[[x25-message-return]]
+==== @KafkaListener Changes
 
-The `isAckAfterHandle()` default implementation now returns true by default.
+Default reply headers will now be populated automatically if needed when a `@KafkaListener` return type is `Message<?>`.
+See <<reply-message>> for more information.
 
-[[x24-agg]]
-==== AggregatingReplyingKafkaTemplate
+The `KafkaHeaders.RECEIVED_MESSAGE_KEY` is no longer populated with a `null` value when the incoming record has a `null` key; the header is omitted altogether.
 
-The `releaseStrategy` is now a `BiConsumer`.
-It is now called after a timeout (as well as when records arrive); the second parameter is `true` in the case of a call after a timeout.
+`@KafkaListener` methods can now specify a `ConsumerRecordMetadata` parameter instead of using discrete headers for metadata such as topic, partition, etc.
+See <<consumer-record-metadata>> for more information.
 
-See <<aggregating-request-reply>> for more information.
+[[x25-container]]
+==== Listener Container Changes
 
-==== Listener Container
+The `assignmentCommitOption` container property is now `LATEST_ONLY_NO_TX` by default.
+See <<container-props>> for more information.
 
-The `ContainerProperties` provides an `authorizationExceptionRetryInterval` option to let the listener container to retry after any `AuthorizationException` is thrown by the `KafkaConsumer`.
-See its JavaDocs and <<kafka-container>> for more information.
+The `subBatchPerPartition` container property is now `true` by default when using transactions.
+See <<transactions>> for more information.
 
-==== @KafkaListener
+A new `RecoveringBatchErrorHandler` is now provided.
+See <<recovering-batch-eh>> for more information.
 
-The `@KafkaListener` annotation has a new property `splitIterables`; default true.
-When a replying listener returns an `Iterable` this property controls whether the return result is sent as a single record or a record for each element is sent.
-See <<annotation-send-to>> for more information
+Static group membership is now supported.
+See <<message-listener-container>> for more information.
 
-Batch listeners can now be configured with a `BatchToRecordAdapter`; this allows, for example, the batch to be processed in a transaction while the listener gets one record at a time.
-With the default implementation, a `ConsumerRecordRecoverer` can be used to handle errors within the batch, without aborting the entire batch - this might be useful when using transactions.
-See <<transactions-batch>> for more information.
+When incremental/cooperative rebalancing is configured, if offsets fail to commit with a non-fatal `RebalanceInProgressException`, the container will attempt to re-commit the offsets for the partitions that remain assigned to this instance after the rebalance is completed.
 
-==== Kafka Streams
+The default error handler is now the `SeekToCurrentErrorHandler` for record listeners and `RecoveringBatchErrorHandler` for batch listeners.
+See <<error-handlers>> for more information.
 
-The `StreamsBuilderFactoryBean` accepts a new property `KafkaStreamsInfrastructureCustomizer`.
-This allows configuration of the builder and/or topology before the stream is created.
-See <<streams-spring>> for more information.
+You can now control the level at which exceptions intentionally thrown by standard error handlers are logged.
+See <<error-handlers>> for more information.
 
-=== Migration Guide
+The `getAssignmentsByClientId()` method has been added, making it easier to determine which consumers in a concurrent container are assigned which partition(s).
+See <<container-props>> for more information.
 
-* This release is essentially the same as the 2.3.x line, except it has been compiled against the 2.4 `kafka-clients` jar, due to a binary incompatibility.
+[[x25-template]]
+==== KafkaTemplate Changes
 
-* To use Spring for Apache Kafka 2.4.x with Spring Boot 2.2.x, see <<deps-for-24x>>.
+The `KafkaTemplate` can now maintain micrometer timers.
+See <<micrometer>> for more information.
 
-* See <<x24-carl>> for important information about rebalance listeners.
+The `KafkaTemplate` can now be configured with `ProducerConfig` properties to override those in the producer factory.
+See <<kafka-template>> for more information.
+
+A `RoutingKafkaTemplate` has now been provided.
+See <<routing-template>> for more information.
+
+You can now use `KafkaSendCallback` instead of `ListenerFutureCallback` to get a narrower exception, making it easier to extract the failed `ProducerRecord`.
+See <<kafka-template>> for more information.
+
+[[x25-string-serializer]]
+==== Kafka String Serializer/Deserializer
+
+New `ToStringSerializer`/`StringDeserializer` s as well as an associated `SerDe` are now provided.
+See <<string-serde>> for more information.
+
+[[x25-json-deser]]
+==== JsonDeserializer
+
+The `JsonDeserializer` now has more flexibility to determine the deserialization type.
+See <<serdes-type-methods>> for more information.
+
+[[x25-delegate-serde]]
+==== Delegating Serializer/Deserializer
+
+The `DelegatingSerializer` can now handle "standard" types, when the outbound record has no header.
+See <<delegating-serialization>> for more information.
+
+[[x25-testing]]
+==== Testing Changes
+
+The `KafkaTestUtils.consumerProps()` helper record now sets `ConsumerConfig.AUTO_OFFSET_RESET_CONFIG` to `earliest` by default.
+See <<junit>> for more information.

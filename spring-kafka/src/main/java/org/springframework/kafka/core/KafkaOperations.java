@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.springframework.kafka.core;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -210,12 +211,58 @@ public interface KafkaOperations<K, V> {
 	void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets, String consumerGroupId);
 
 	/**
+	 * When running in a transaction, send the consumer offset(s) to the transaction. It
+	 * is not necessary to call this method if the operations are invoked on a listener
+	 * container thread (and the listener container is configured with a
+	 * {@link org.springframework.kafka.transaction.KafkaAwareTransactionManager}) since
+	 * the container will take care of sending the offsets to the transaction.
+	 * Use with 2.5 brokers or later.
+	 * @param offsets The offsets.
+	 * @param groupMetadata the consumer group metadata.
+	 * @since 2.5
+	 * @see Producer#sendOffsetsToTransaction(Map, ConsumerGroupMetadata)
+	 */
+	default void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets,
+			ConsumerGroupMetadata groupMetadata) {
+
+		throw new UnsupportedOperationException();
+	}
+
+	/**
 	 * Return true if the implementation supports transactions (has a transaction-capable
 	 * producer factory).
 	 * @return true or false.
 	 * @since 2.3
 	 */
 	boolean isTransactional();
+
+	/**
+	 * Return true if this template, when transactional, allows non-transactional operations.
+	 * @return true to allow.
+	 * @since 2.4.3
+	 */
+	default boolean isAllowNonTransactional() {
+		return false;
+	}
+
+	/**
+	 * Return true if the template is currently running in a transaction on the calling
+	 * thread.
+	 * @return true if a transaction is running.
+	 * @since 2.5
+	 */
+	default boolean inTransaction() {
+		return false;
+	}
+
+	/**
+	 * Return the producer factory used by this template.
+	 * @return the factory.
+	 * @since 2.5
+	 */
+	default ProducerFactory<K, V> getProducerFactory() {
+		throw new UnsupportedOperationException("This implementation does not support this operation");
+	}
 
 	/**
 	 * A callback for executing arbitrary operations on the {@link Producer}.

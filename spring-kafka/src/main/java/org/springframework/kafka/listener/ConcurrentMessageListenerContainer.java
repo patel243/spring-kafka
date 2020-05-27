@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,6 +58,8 @@ public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageLis
 
 	private int concurrency = 1;
 
+	private boolean alwaysClientIdSuffix = true;
+
 	/**
 	 * Construct an instance with the supplied configuration properties.
 	 * The topic partitions are distributed evenly across the delegate
@@ -87,44 +89,76 @@ public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageLis
 	}
 
 	/**
+	 * Set to false to suppress adding a suffix to the child container's client.id when
+	 * the concurrency is only 1.
+	 * @param alwaysClientIdSuffix false to suppress, true (default) to include.
+	 * @since 2.2.14
+	 */
+	public void setAlwaysClientIdSuffix(boolean alwaysClientIdSuffix) {
+		this.alwaysClientIdSuffix = alwaysClientIdSuffix;
+	}
+
+	/**
 	 * Return the list of {@link KafkaMessageListenerContainer}s created by
 	 * this container.
 	 * @return the list of {@link KafkaMessageListenerContainer}s created by
 	 * this container.
 	 */
 	public List<KafkaMessageListenerContainer<K, V>> getContainers() {
-		return Collections.unmodifiableList(this.containers);
+		synchronized (this.lifecycleMonitor) {
+			return Collections.unmodifiableList(new ArrayList<>(this.containers));
+		}
 	}
 
 	@Override
 	public Collection<TopicPartition> getAssignedPartitions() {
-		return this.containers.stream()
-				.map(KafkaMessageListenerContainer::getAssignedPartitions)
-				.filter(Objects::nonNull)
-				.flatMap(Collection::stream)
-				.collect(Collectors.toList());
+		synchronized (this.lifecycleMonitor) {
+			return this.containers.stream()
+					.map(KafkaMessageListenerContainer::getAssignedPartitions)
+					.filter(Objects::nonNull)
+					.flatMap(Collection::stream)
+					.collect(Collectors.toList());
+		}
+	}
+
+	@Override
+	public Map<String, Collection<TopicPartition>> getAssignmentsByClientId() {
+		synchronized (this.lifecycleMonitor) {
+			Map<String, Collection<TopicPartition>> assignments = new HashMap<>();
+			this.containers.forEach(container -> {
+				Map<String, Collection<TopicPartition>> byClientId = container.getAssignmentsByClientId();
+				if (byClientId != null) {
+					assignments.putAll(byClientId);
+				}
+			});
+			return assignments;
+		}
 	}
 
 	@Override
 	public boolean isContainerPaused() {
-		boolean paused = isPaused();
-		if (paused) {
-			for (AbstractMessageListenerContainer<K, V> container : this.containers) {
-				if (!container.isContainerPaused()) {
-					return false;
+		synchronized (this.lifecycleMonitor) {
+			boolean paused = isPaused();
+			if (paused) {
+				for (AbstractMessageListenerContainer<K, V> container : this.containers) {
+					if (!container.isContainerPaused()) {
+						return false;
+					}
 				}
 			}
+			return paused;
 		}
-		return paused;
 	}
 
 	@Override
 	public Map<String, Map<MetricName, ? extends Metric>> metrics() {
-		Map<String, Map<MetricName, ? extends Metric>> metrics = new HashMap<>();
-		for (KafkaMessageListenerContainer<K, V> container : this.containers) {
-			metrics.putAll(container.metrics());
+		synchronized (this.lifecycleMonitor) {
+			Map<String, Map<MetricName, ? extends Metric>> metrics = new HashMap<>();
+			for (KafkaMessageListenerContainer<K, V> container : this.containers) {
+				metrics.putAll(container.metrics());
+			}
+			return Collections.unmodifiableMap(metrics);
 		}
-		return Collections.unmodifiableMap(metrics);
 	}
 
 	/*
@@ -135,7 +169,7 @@ public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageLis
 		if (!isRunning()) {
 			checkTopics();
 			ContainerProperties containerProperties = getContainerProperties();
-			TopicPartitionOffset[] topicPartitions = containerProperties.getTopicPartitionsToAssign();
+			TopicPartitionOffset[] topicPartitions = containerProperties.getTopicPartitions();
 			if (topicPartitions != null && this.concurrency > topicPartitions.length) {
 				this.logger.warn(() -> "When specific partitions are provided, the concurrency must be less than or "
 						+ "equal to the number of partitions; reduced from " + this.concurrency + " to "
@@ -145,21 +179,15 @@ public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageLis
 			setRunning(true);
 
 			for (int i = 0; i < this.concurrency; i++) {
-				KafkaMessageListenerContainer<K, V> container;
-				if (topicPartitions == null) {
-					container = new KafkaMessageListenerContainer<>(this, this.consumerFactory, containerProperties);
-				}
-				else {
-					container = new KafkaMessageListenerContainer<>(this, this.consumerFactory,
-							containerProperties, partitionSubset(containerProperties, i));
-				}
+				KafkaMessageListenerContainer<K, V> container =
+						constructContainer(containerProperties, topicPartitions, i);
 				String beanName = getBeanName();
 				container.setBeanName((beanName != null ? beanName : "consumer") + "-" + i);
 				container.setApplicationContext(getApplicationContext());
 				if (getApplicationEventPublisher() != null) {
 					container.setApplicationEventPublisher(getApplicationEventPublisher());
 				}
-				container.setClientIdSuffix("-" + i);
+				container.setClientIdSuffix(this.concurrency > 1 || this.alwaysClientIdSuffix ? "-" + i : "");
 				container.setGenericErrorHandler(getGenericErrorHandler());
 				container.setAfterRollbackProcessor(getAfterRollbackProcessor());
 				container.setRecordInterceptor(getRecordInterceptor());
@@ -179,8 +207,21 @@ public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageLis
 		}
 	}
 
+	private KafkaMessageListenerContainer<K, V> constructContainer(ContainerProperties containerProperties,
+			TopicPartitionOffset[] topicPartitions, int i) {
+		KafkaMessageListenerContainer<K, V> container;
+		if (topicPartitions == null) {
+			container = new KafkaMessageListenerContainer<>(this, this.consumerFactory, containerProperties);
+		}
+		else {
+			container = new KafkaMessageListenerContainer<>(this, this.consumerFactory,
+					containerProperties, partitionSubset(containerProperties, i));
+		}
+		return container;
+	}
+
 	private TopicPartitionOffset[] partitionSubset(ContainerProperties containerProperties, int i) {
-		TopicPartitionOffset[] topicPartitions = containerProperties.getTopicPartitionsToAssign();
+		TopicPartitionOffset[] topicPartitions = containerProperties.getTopicPartitions();
 		if (this.concurrency == 1) {
 			return topicPartitions;
 		}
@@ -231,14 +272,18 @@ public class ConcurrentMessageListenerContainer<K, V> extends AbstractMessageLis
 
 	@Override
 	public void pause() {
-		super.pause();
-		this.containers.forEach(AbstractMessageListenerContainer::pause);
+		synchronized (this.lifecycleMonitor) {
+			super.pause();
+			this.containers.forEach(AbstractMessageListenerContainer::pause);
+		}
 	}
 
 	@Override
 	public void resume() {
-		super.resume();
-		this.containers.forEach(AbstractMessageListenerContainer::resume);
+		synchronized (this.lifecycleMonitor) {
+			super.resume();
+			this.containers.forEach(AbstractMessageListenerContainer::resume);
+		}
 	}
 
 	@Override

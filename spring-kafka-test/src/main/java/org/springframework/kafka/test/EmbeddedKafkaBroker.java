@@ -18,7 +18,9 @@ package org.springframework.kafka.test;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -44,6 +47,7 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.kafka.common.utils.Exit;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.zookeeper.server.NIOServerCnxnFactory;
@@ -278,6 +282,7 @@ public class EmbeddedKafkaBroker implements InitializingBean, DisposableBean {
 
 	@Override
 	public void afterPropertiesSet() {
+		overrideExitMethods();
 		try {
 			this.zookeeper = new EmbeddedZookeeper(this.zkPort);
 		}
@@ -286,6 +291,7 @@ public class EmbeddedKafkaBroker implements InitializingBean, DisposableBean {
 		}
 		this.zkConnect = LOOPBACK + ":" + this.zookeeper.getPort();
 		this.kafkaServers.clear();
+		boolean userLogDir = this.brokerProperties.get(KafkaConfig.LogDirProp()) != null && this.count == 1;
 		for (int i = 0; i < this.count; i++) {
 			Properties brokerConfigProperties = createBrokerProperties(i);
 			brokerConfigProperties.setProperty(KafkaConfig.ReplicaSocketTimeoutMsProp(), "1000");
@@ -296,6 +302,9 @@ public class EmbeddedKafkaBroker implements InitializingBean, DisposableBean {
 			this.brokerProperties.forEach(brokerConfigProperties::put);
 			if (!this.brokerProperties.containsKey(KafkaConfig.NumPartitionsProp())) {
 				brokerConfigProperties.setProperty(KafkaConfig.NumPartitionsProp(), "" + this.partitionsPerTopic);
+			}
+			if (!userLogDir) {
+				logDir(brokerConfigProperties);
 			}
 			KafkaServer server = TestUtils.createServer(new KafkaConfig(brokerConfigProperties), Time.SYSTEM);
 			this.kafkaServers.add(server);
@@ -312,6 +321,36 @@ public class EmbeddedKafkaBroker implements InitializingBean, DisposableBean {
 		}
 		System.setProperty(this.brokerListProperty, getBrokersAsString());
 		System.setProperty(SPRING_EMBEDDED_ZOOKEEPER_CONNECT, getZookeeperConnectionString());
+	}
+
+	private void logDir(Properties brokerConfigProperties) {
+		try {
+			brokerConfigProperties.put(KafkaConfig.LogDirProp(),
+					Files.createTempDirectory("spring.kafka." + UUID.randomUUID()).toString());
+		}
+		catch (IOException e) {
+			throw new UncheckedIOException(e);
+		}
+	}
+
+	private void overrideExitMethods() {
+		String exitMsg = "Exit.%s(%d, %s) called";
+		Exit.setExitProcedure((statusCode, message) -> {
+			if (logger.isDebugEnabled()) {
+				logger.debug(new RuntimeException(), String.format(exitMsg, "exit", statusCode, message));
+			}
+			else {
+				logger.warn(String.format(exitMsg, "exit", statusCode, message));
+			}
+		});
+		Exit.setHaltProcedure((statusCode, message) -> {
+			if (logger.isDebugEnabled()) {
+				logger.debug(new RuntimeException(), String.format(exitMsg, "halt", statusCode, message));
+			}
+			else {
+				logger.warn(String.format(exitMsg, "halt", statusCode, message));
+			}
+		});
 	}
 
 	private Properties createBrokerProperties(int i) {
