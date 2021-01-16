@@ -348,7 +348,7 @@ public abstract class AbstractMessageListenerContainer<K, V>
 					.filter(entry -> AdminClientConfig.configNames().contains(entry.getKey()))
 					.collect(Collectors.toMap(Entry::getKey, Entry::getValue));
 			List<String> missing = null;
-			try (AdminClient client = AdminClient.create(configs)) {
+			try (AdminClient client = AdminClient.create(configs)) { // NOSONAR - false positive null check
 				if (client != null) {
 					String[] topics = this.containerProperties.getTopics();
 					if (topics == null) {

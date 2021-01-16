@@ -1,4 +1,168 @@
 [[migration]]
+=== Changes between 2.5 and 2.6
+
+[[x26-kafka-client]]
+==== Kafka Client Version
+
+This version requires the 2.6.0 `kafka-clients`.
+
+==== Listener Container Changes
+
+The default `EOSMode` is now `BETA`.
+See <<exactly-once>> for more information.
+
+Various error handlers (that extend `FailedRecordProcessor`) and the `DefaultAfterRollbackProcessor` now reset the `BackOff` if recovery fails.
+In addition, you can now select the `BackOff` to use based on the failed record and/or exception.
+See <<seek-to-current>>, <<recovering-batch-eh>>, <<dead-letters>> and <<after-rollback>> for more information.
+
+You can now configure an `adviceChain` in the container properties.
+See <<container-props>> for more information.
+
+When the container is configured to publish `ListenerContainerIdleEvent` s, it now publishes a `ListenerContainerNoLongerIdleEvent` when a record is received after publishing an idle event.
+See <<events>> and <<idle-containers>> for more information.
+
+==== @KafkaListener Changes
+
+When using manual partition assignment, you can now specify a wildcard for determining which partitions should be reset to the initial offset.
+In addition, if the listener implements `ConsumerSeekAware`, `onPartitionsAssigned()` is called after the manual assignment.
+(Also added in version 2.5.5).
+See <<manual-assignment>> for more information.
+
+Convenience methods have been added to `AbstractConsumerSeekAware` to make seeking easier.
+See <<seek>> for more information.
+
+==== ErrorHandler Changes
+
+Subclasses of `FailedRecordProcessor` (e.g. `SeekToCurrentErrorHandler`, `DefaultAfterRollbackProcessor`, `RecoveringBatchErrorHandler`) can now be configured to reset the retry state if the exception is a different type to that which occurred previously with this record.
+See <<seek-to-current>>, <<after-rollback>>, <<recovering-batch-eh>> for more information.
+
+==== Producer Factory Changes
+
+You can now set a maximum age for producers after which they will be closed and recreated.
+See <<transactions>> for more information.
+
+You can now update the configuration map after the `DefaultKafkaProducerFactory` has been created.
+This might be useful, for example, if you have to update SSL key/trust store locations after a credentials change.
+See <<producer-factory>> for more information.
+
+=== Changes between 2.4 and 2.5
+
+This section covers the changes made from version 2.4 to version 2.5.
+For changes in earlier version, see <<history>>.
+
+Also see <<new-in-sik>>.
+
+[[x25-factory-listeners]]
+==== Consumer/Producer Factory Changes
+
+The default consumer and producer factories can now invoke a callback whenever a consumer or producer is created or closed.
+Implementations for native Micrometer metrics are provided.
+See <<factory-listeners>> for more information.
+
+You can now change bootstrap server properties at runtime, enabling failover to another Kafka cluster.
+See <<connecting>> for more information.
+
+[[x25-streams-listeners]]
+==== `StreamsBuilderFactoryBean` Changes
+
+The factory bean can now invoke a callback whenever a `KafkaStreams` created or destroyed.
+An Implementation for native Micrometer metrics is provided.
+See <<streams-micrometer>> for more information.
+
+[[x25-kafka-client]]
+==== Kafka Client Version
+
+This version requires the 2.5.0 `kafka-clients`.
+
+==== Class/Package Changes
+
+`SeekUtils` has been moved from the `o.s.k.support` package to `o.s.k.listener`.
+
+[[x25-delivery]]
+==== Delivery Attempts Header
+
+There is now an option to to add a header which tracks delivery attempts when using certain error handlers and after rollback processors.
+See <<delivery-header>> for more information.
+
+[[x25-message-return]]
+==== @KafkaListener Changes
+
+Default reply headers will now be populated automatically if needed when a `@KafkaListener` return type is `Message<?>`.
+See <<reply-message>> for more information.
+
+The `KafkaHeaders.RECEIVED_MESSAGE_KEY` is no longer populated with a `null` value when the incoming record has a `null` key; the header is omitted altogether.
+
+`@KafkaListener` methods can now specify a `ConsumerRecordMetadata` parameter instead of using discrete headers for metadata such as topic, partition, etc.
+See <<consumer-record-metadata>> for more information.
+
+[[x25-container]]
+==== Listener Container Changes
+
+The `assignmentCommitOption` container property is now `LATEST_ONLY_NO_TX` by default.
+See <<container-props>> for more information.
+
+The `subBatchPerPartition` container property is now `true` by default when using transactions.
+See <<transactions>> for more information.
+
+A new `RecoveringBatchErrorHandler` is now provided.
+See <<recovering-batch-eh>> for more information.
+
+Static group membership is now supported.
+See <<message-listener-container>> for more information.
+
+When incremental/cooperative rebalancing is configured, if offsets fail to commit with a non-fatal `RebalanceInProgressException`, the container will attempt to re-commit the offsets for the partitions that remain assigned to this instance after the rebalance is completed.
+
+The default error handler is now the `SeekToCurrentErrorHandler` for record listeners and `RecoveringBatchErrorHandler` for batch listeners.
+See <<error-handlers>> for more information.
+
+You can now control the level at which exceptions intentionally thrown by standard error handlers are logged.
+See <<error-handlers>> for more information.
+
+The `getAssignmentsByClientId()` method has been added, making it easier to determine which consumers in a concurrent container are assigned which partition(s).
+See <<container-props>> for more information.
+
+You can now suppress logging entire `ConsumerRecord` s in error, debug logs etc.
+See `onlyLogRecordMetadata` in <<container-props>>.
+
+[[x25-template]]
+==== KafkaTemplate Changes
+
+The `KafkaTemplate` can now maintain micrometer timers.
+See <<micrometer>> for more information.
+
+The `KafkaTemplate` can now be configured with `ProducerConfig` properties to override those in the producer factory.
+See <<kafka-template>> for more information.
+
+A `RoutingKafkaTemplate` has now been provided.
+See <<routing-template>> for more information.
+
+You can now use `KafkaSendCallback` instead of `ListenerFutureCallback` to get a narrower exception, making it easier to extract the failed `ProducerRecord`.
+See <<kafka-template>> for more information.
+
+[[x25-string-serializer]]
+==== Kafka String Serializer/Deserializer
+
+New `ToStringSerializer`/`StringDeserializer` s as well as an associated `SerDe` are now provided.
+See <<string-serde>> for more information.
+
+[[x25-json-deser]]
+==== JsonDeserializer
+
+The `JsonDeserializer` now has more flexibility to determine the deserialization type.
+See <<serdes-type-methods>> for more information.
+
+[[x25-delegate-serde]]
+==== Delegating Serializer/Deserializer
+
+The `DelegatingSerializer` can now handle "standard" types, when the outbound record has no header.
+See <<delegating-serialization>> for more information.
+
+[[x25-testing]]
+==== Testing Changes
+
+The `KafkaTestUtils.consumerProps()` helper record now sets `ConsumerConfig.AUTO_OFFSET_RESET_CONFIG` to `earliest` by default.
+See <<junit>> for more information.
+
 === Changes between 2.3 and 2.4
 
 [[kafka-client-2.4]]
@@ -48,7 +212,7 @@ When a replying listener returns an `Iterable` this property controls whether th
 See <<annotation-send-to>> for more information
 
 Batch listeners can now be configured with a `BatchToRecordAdapter`; this allows, for example, the batch to be processed in a transaction while the listener gets one record at a time.
-With the default implementation, a `ConsumerRecordRecoverer` can be used to handle errors within the batch, without aborting the entire batch - this might be useful when using transactions.
+With the default implementation, a `ConsumerRecordRecoverer` can be used to handle errors within the batch, without stopping the processing of the entire batch - this might be useful when using transactions.
 See <<transactions-batch>> for more information.
 
 ==== Kafka Streams
@@ -144,7 +308,7 @@ Starting with version 2.3.2, recovered records' offsets will be committed when t
 
 See <<seek-to-current>> for more information.
 
-The `DeadLetterPublishingRecoverer`, when used in conjunction with an `ErrorHandlingDeserializer2`, now sets the payload of the message sent to the dead-letter topic, to the original value that could not be deserialized.
+The `DeadLetterPublishingRecoverer`, when used in conjunction with an `ErrorHandlingDeserializer`, now sets the payload of the message sent to the dead-letter topic, to the original value that could not be deserialized.
 Previously, it was `null` and user code needed to extract the `DeserializationException` from the message headers.
 See <<dead-letters>> for more information.
 
@@ -239,7 +403,7 @@ See <<container-factory>> for more information.
 A new container property (`missingTopicsFatal`) has been added.
 See <<kafka-container>> for more information.
 
-A `ConsumerStoppedEvent` is now emitted when a consumer terminates.
+A `ConsumerStoppedEvent` is now emitted when a consumer stops.
 See <<thread-safety>> for more information.
 
 Batch listeners can optionally receive the complete `ConsumerRecords<?, ?>` object instead of a `List<ConsumerRecord<?, ?>`.

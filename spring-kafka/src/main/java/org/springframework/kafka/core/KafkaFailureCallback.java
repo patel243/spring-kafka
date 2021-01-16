@@ -34,7 +34,7 @@ public interface KafkaFailureCallback<K, V> extends FailureCallback {
 
 	@Override
 	default void onFailure(Throwable ex) {
-		onFailure((KafkaProducerException) ex);
+		onFailure((KafkaProducerException) ex); // NOSONAR (unchecked cast)
 	}
 
 	/**

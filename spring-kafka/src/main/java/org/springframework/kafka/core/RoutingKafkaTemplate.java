@@ -44,6 +44,8 @@ import org.springframework.util.Assert;
  */
 public class RoutingKafkaTemplate extends KafkaTemplate<Object, Object> {
 
+	private static final String THIS_METHOD_IS_NOT_SUPPORTED = "This method is not supported";
+
 	private final Map<Pattern, ProducerFactory<Object, Object>> factoryMatchers;
 
 	private final ConcurrentMap<String, ProducerFactory<Object, Object>> factoryMap = new ConcurrentHashMap<>();
@@ -72,7 +74,7 @@ public class RoutingKafkaTemplate extends KafkaTemplate<Object, Object> {
 
 	@Override
 	public ProducerFactory<Object, Object> getProducerFactory() {
-		throw new UnsupportedOperationException("This method is not supported");
+		throw new UnsupportedOperationException(THIS_METHOD_IS_NOT_SUPPORTED);
 	}
 
 	@Override
@@ -91,27 +93,27 @@ public class RoutingKafkaTemplate extends KafkaTemplate<Object, Object> {
 
 	@Override
 	public <T> T execute(ProducerCallback<Object, Object, T> callback) {
-		throw new UnsupportedOperationException("This method is not supported");
+		throw new UnsupportedOperationException(THIS_METHOD_IS_NOT_SUPPORTED);
 	}
 
 	@Override
 	public <T> T executeInTransaction(OperationsCallback<Object, Object, T> callback) {
-		throw new UnsupportedOperationException("This method is not supported");
+		throw new UnsupportedOperationException(THIS_METHOD_IS_NOT_SUPPORTED);
 	}
 
 	@Override
 	public void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets, String consumerGroupId) {
-		throw new UnsupportedOperationException("This method is not supported");
+		throw new UnsupportedOperationException(THIS_METHOD_IS_NOT_SUPPORTED);
 	}
 
 	@Override
 	public Map<MetricName, ? extends Metric> metrics() {
-		throw new UnsupportedOperationException("This method is not supported");
+		throw new UnsupportedOperationException(THIS_METHOD_IS_NOT_SUPPORTED);
 	}
 
 	@Override
 	public void flush() {
-		throw new UnsupportedOperationException("This method is not supported");
+		throw new UnsupportedOperationException(THIS_METHOD_IS_NOT_SUPPORTED);
 	}
 
 }

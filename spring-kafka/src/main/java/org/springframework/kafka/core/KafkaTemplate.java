@@ -62,7 +62,10 @@ import org.springframework.util.concurrent.SettableListenableFuture;
 
 
 /**
- * A template for executing high-level operations.
+ * A template for executing high-level operations. When used with a
+ * {@link DefaultKafkaProducerFactory}, the template is thread-safe. The producer factory
+ * and {@link org.apache.kafka.clients.producer.KafkaProducer} ensure this; refer to their
+ * respective javadocs.
  *
  * @param <K> the key type.
  * @param <V> the value type.
@@ -382,6 +385,7 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V>, ApplicationCo
 
 	@Override
 	public ListenableFuture<SendResult<K, V>> send(ProducerRecord<K, V> record) {
+		Assert.notNull(record, "'record' cannot be null");
 		return doSend(record);
 	}
 
@@ -598,7 +602,7 @@ public class KafkaTemplate<K, V> implements KafkaOperations<K, V>, ApplicationCo
 					}
 					future.setException(new KafkaProducerException(producerRecord, "Failed to send", exception));
 					if (KafkaTemplate.this.producerListener != null) {
-						KafkaTemplate.this.producerListener.onError(producerRecord, exception);
+						KafkaTemplate.this.producerListener.onError(producerRecord, metadata, exception);
 					}
 					KafkaTemplate.this.logger.debug(exception, () -> "Failed to send: " + producerRecord);
 				}

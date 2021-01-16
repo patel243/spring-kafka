@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2020 the original author or authors.
+ * Copyright 2019-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -98,7 +98,7 @@ public class ConcurrentMessageListenerContainerMockTests {
 		exec.setCorePoolSize(1);
 		exec.afterPropertiesSet();
 		containerProperties.setConsumerTaskExecutor(exec);
-		containerProperties.setConsumerStartTimout(Duration.ofMillis(50));
+		containerProperties.setConsumerStartTimeout(Duration.ofMillis(50));
 		ConcurrentMessageListenerContainer container = new ConcurrentMessageListenerContainer<>(consumerFactory,
 				containerProperties);
 		container.setConcurrency(2);
@@ -372,10 +372,12 @@ public class ConcurrentMessageListenerContainerMockTests {
 				.collect(Collectors.toMap(tp -> tp, tp -> 200L)));
 		given(consumer.offsetsForTimes(Collections.singletonMap(tp0, 42L)))
 				.willReturn(Collections.singletonMap(tp0, new OffsetAndTimestamp(73L, 42L)));
+		Map<TopicPartition, OffsetAndTimestamp> map = new HashMap<>(assignments.stream()
+				.collect(Collectors.toMap(tp -> tp,
+						tp -> new OffsetAndTimestamp(tp.equals(tp0) ? 73L : 92L, 43L))));
+		map.put(new TopicPartition("foo", 5), null);
 		given(consumer.offsetsForTimes(any()))
-				.willReturn(assignments.stream()
-					.collect(Collectors.toMap(tp -> tp,
-							tp -> new OffsetAndTimestamp(tp.equals(tp0) ? 73L : 92L, 43L))));
+				.willReturn(map);
 		given(consumerFactory.createConsumer("grp", "", "-0", KafkaTestUtils.defaultPropertyOverrides()))
 			.willReturn(consumer);
 		ContainerProperties containerProperties = new ContainerProperties("foo");

@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -52,6 +53,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.serialization.Serializer;
@@ -118,6 +120,11 @@ public class KafkaTemplateTests {
 	void testTemplate() {
 		Map<String, Object> senderProps = KafkaTestUtils.producerProps(embeddedKafka);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(senderProps);
+		AtomicBoolean ppCalled = new AtomicBoolean();
+		pf.addPostProcessor(prod -> {
+			ppCalled.set(true);
+			return prod;
+		});
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf, true);
 
 		template.setDefaultTopic(INT_KEY_TOPIC);
@@ -160,6 +167,7 @@ public class KafkaTemplateTests {
 		assertThat(partitions).isNotNull();
 		assertThat(partitions).hasSize(2);
 		pf.destroy();
+		assertThat(ppCalled.get()).isTrue();
 	}
 
 	@Test
@@ -269,7 +277,9 @@ public class KafkaTemplateTests {
 			}
 
 			@Override
-			public void onError(ProducerRecord<Integer, String> producerRecord, Exception exception) {
+			public void onError(ProducerRecord<Integer, String> producerRecord, RecordMetadata metadata,
+					Exception exception) {
+
 				assertThat(producerRecord).isNotNull();
 				assertThat(exception).isNotNull();
 				onErrorDelegateCalls.incrementAndGet();
@@ -291,7 +301,8 @@ public class KafkaTemplateTests {
 		//Drain the topic
 		KafkaTestUtils.getSingleRecord(consumer, INT_KEY_TOPIC);
 		pf.destroy();
-		cpl.onError(records.get(0), new RuntimeException("x"));
+		cpl.onError(records.get(0), new RecordMetadata(new TopicPartition(INT_KEY_TOPIC, -1), 0L, 0L, 0L, 0L, 0, 0),
+				new RuntimeException("x"));
 		assertThat(onErrorDelegateCalls.get()).isEqualTo(2);
 	}
 

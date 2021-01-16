@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package org.springframework.kafka.test.utils;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -36,6 +38,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.IntegerDeserializer;
 import org.apache.kafka.common.serialization.IntegerSerializer;
@@ -56,6 +59,8 @@ import org.springframework.util.Assert;
  * @author Artem Bilan
  */
 public final class KafkaTestUtils {
+
+	private static final int TEN = 10;
 
 	private static final LogAccessor logger = new LogAccessor(LogFactory.getLog(KafkaTestUtils.class)); // NOSONAR
 
@@ -115,7 +120,6 @@ public final class KafkaTestUtils {
 	public static Map<String, Object> producerProps(String brokers) {
 		Map<String, Object> props = new HashMap<>();
 		props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
-		props.put(ProducerConfig.RETRIES_CONFIG, 0);
 		props.put(ProducerConfig.BATCH_SIZE_CONFIG, "16384");
 		props.put(ProducerConfig.LINGER_MS_CONFIG, 1);
 		props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, "33554432");
@@ -235,9 +239,40 @@ public final class KafkaTestUtils {
 
 		try (AdminClient client = AdminClient
 				.create(Collections.singletonMap(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokerAddresses))) {
-			return client.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get()
+			return client.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get() // NOSONAR false positive
 					.get(new TopicPartition(topic, partition));
 		}
+	}
+
+	/**
+	 * Return the end offsets of the requested topic/partitions
+	 * @param consumer the consumer.
+	 * @param topic the topic.
+	 * @param partitions the partitions, or null for all partitions.
+	 * @return the map of end offsets.
+	 * @since 2.6.5
+	 * @see Consumer#endOffsets(Collection, Duration)
+	 */
+	public static Map<TopicPartition, Long> getEndOffsets(Consumer<?, ?> consumer, String topic,
+			Integer... partitions) {
+
+		Collection<TopicPartition> tps;
+		if (partitions == null || partitions.length == 0) {
+			Map<String, List<PartitionInfo>> parts = consumer.listTopics(Duration.ofSeconds(TEN));
+			tps = parts.entrySet()
+					.stream()
+					.filter(entry -> entry.getKey().equals(topic))
+					.flatMap(entry -> entry.getValue().stream())
+					.map(pi -> new TopicPartition(topic, pi.partition()))
+					.collect(Collectors.toList());
+		}
+		else {
+			Assert.noNullElements(partitions, "'partitions' cannot have null elements");
+			tps = Arrays.stream(partitions)
+					.map(part -> new TopicPartition(topic, part))
+					.collect(Collectors.toList());
+		}
+		return consumer.endOffsets(tps, Duration.ofSeconds(TEN));
 	}
 
 	/**

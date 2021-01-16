@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,15 +39,17 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import javax.validation.Valid;
-import javax.validation.ValidationException;
 import javax.validation.constraints.Max;
 
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -60,19 +62,27 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.Role;
 import org.springframework.context.event.EventListener;
 import org.springframework.context.support.PropertySourcesPlaceholderConfigurer;
 import org.springframework.core.MethodParameter;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.data.web.JsonPath;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
@@ -87,6 +97,7 @@ import org.springframework.kafka.core.MicrometerConsumerListener;
 import org.springframework.kafka.core.MicrometerProducerListener;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.event.ListenerContainerIdleEvent;
+import org.springframework.kafka.event.ListenerContainerNoLongerIdleEvent;
 import org.springframework.kafka.listener.AbstractConsumerSeekAware;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
 import org.springframework.kafka.listener.ConsumerAwareErrorHandler;
@@ -96,6 +107,7 @@ import org.springframework.kafka.listener.ConsumerSeekAware;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.ContainerProperties.AckMode;
 import org.springframework.kafka.listener.KafkaListenerErrorHandler;
+import org.springframework.kafka.listener.KafkaMessageListenerContainer;
 import org.springframework.kafka.listener.ListenerExecutionFailedException;
 import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.kafka.listener.adapter.FilteringMessageListenerAdapter;
@@ -128,6 +140,7 @@ import org.springframework.messaging.MessageHeaders;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.handler.annotation.SendTo;
+import org.springframework.messaging.handler.annotation.support.MethodArgumentNotValidException;
 import org.springframework.messaging.handler.invocation.HandlerMethodArgumentResolver;
 import org.springframework.messaging.support.GenericMessage;
 import org.springframework.messaging.support.MessageBuilder;
@@ -143,7 +156,6 @@ import org.springframework.validation.Errors;
 import org.springframework.validation.Validator;
 
 import io.micrometer.core.instrument.ImmutableTag;
-import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -166,7 +178,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 		"annotated25", "annotated25reply1", "annotated25reply2", "annotated26", "annotated27", "annotated28",
 		"annotated29", "annotated30", "annotated30reply", "annotated31", "annotated32", "annotated33",
 		"annotated34", "annotated35", "annotated36", "annotated37", "foo", "manualStart", "seekOnIdle",
-		"annotated38", "annotated38reply", "annotated39"})
+		"annotated38", "annotated38reply", "annotated39" })
 public class EnableKafkaIntegrationTests {
 
 	private static final String DEFAULT_TEST_GROUP_ID = "testAnnot";
@@ -234,6 +246,10 @@ public class EnableKafkaIntegrationTests {
 		List<?> containers = KafkaTestUtils.getPropertyValue(container, "containers", List.class);
 		assertThat(KafkaTestUtils.getPropertyValue(containers.get(0), "listenerConsumer.consumerGroupId"))
 				.isEqualTo(DEFAULT_TEST_GROUP_ID);
+		assertThat(KafkaTestUtils.getPropertyValue(containers.get(0), "listenerConsumer.maxPollInterval"))
+				.isEqualTo(300000L);
+		assertThat(KafkaTestUtils.getPropertyValue(containers.get(0), "listenerConsumer.syncCommitTimeout"))
+				.isEqualTo(Duration.ofSeconds(60));
 		container.stop();
 	}
 
@@ -241,13 +257,11 @@ public class EnableKafkaIntegrationTests {
 	public void testSimple() throws Exception {
 		this.recordFilter.called = false;
 		template.send("annotated1", 0, "foo");
-		template.flush();
 		assertThat(this.listener.latch1.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.config.globalErrorThrowable).isNotNull();
 		assertThat(this.listener.receivedGroupId).isEqualTo("foo");
 
 		template.send("annotated2", 0, 123, "foo");
-		template.flush();
 		assertThat(this.listener.latch2.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.listener.key).isEqualTo(123);
 		assertThat(this.listener.partition).isNotNull();
@@ -271,13 +285,11 @@ public class EnableKafkaIntegrationTests {
 						.isEqualTo(2L);
 
 		template.send("annotated3", 0, "foo");
-		template.flush();
 		assertThat(this.listener.latch3.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.listener.capturedRecord.value()).isEqualTo("foo");
 		assertThat(this.config.listen3Exception).isNotNull();
 
 		template.send("annotated4", 0, "foo");
-		template.flush();
 		assertThat(this.listener.latch4.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.listener.capturedRecord.value()).isEqualTo("foo");
 		assertThat(this.listener.ack).isNotNull();
@@ -310,6 +322,10 @@ public class EnableKafkaIntegrationTests {
 				.isEqualTo("qux");
 		assertThat(KafkaTestUtils.getPropertyValue(containers.get(0), "listenerConsumer.consumer.clientId"))
 				.isEqualTo("clientIdViaProps3-0");
+
+		template.send("annotated4", 0, "foo");
+		assertThat(this.listener.noLongerIdleEventLatch.await(60, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.listener.noLongerIdleEvent.getListenerId().startsWith("qux-"));
 
 		template.send("annotated5", 0, 0, "foo");
 		template.send("annotated5", 1, 0, "bar");
@@ -369,13 +385,15 @@ public class EnableKafkaIntegrationTests {
 		assertThat(listenerContainer.getContainerProperties().getSyncCommitTimeout()).isNull();
 		this.registry.start();
 		assertThat(listenerContainer.isRunning()).isTrue();
-		assertThat(((ConcurrentMessageListenerContainer<?, ?>) listenerContainer)
+		KafkaMessageListenerContainer<?, ?> kafkaMessageListenerContainer =
+				((ConcurrentMessageListenerContainer<?, ?>) listenerContainer)
 				.getContainers()
-				.get(0)
+				.get(0);
+		assertThat(kafkaMessageListenerContainer
 				.getContainerProperties().getSyncCommitTimeout())
-				.isEqualTo(Duration.ofSeconds(60));
+				.isEqualTo(Duration.ofSeconds(59));
 		assertThat(listenerContainer.getContainerProperties().getSyncCommitTimeout())
-				.isEqualTo(Duration.ofSeconds(60));
+				.isEqualTo(Duration.ofSeconds(59));
 		listenerContainer.stop();
 		assertThat(KafkaTestUtils.getPropertyValue(listenerContainer, "containerProperties.syncCommits", Boolean.class))
 				.isFalse();
@@ -383,6 +401,8 @@ public class EnableKafkaIntegrationTests {
 				.isNotNull();
 		assertThat(KafkaTestUtils.getPropertyValue(listenerContainer, "containerProperties.consumerRebalanceListener"))
 				.isNotNull();
+		assertThat(KafkaTestUtils.getPropertyValue(kafkaMessageListenerContainer, "listenerConsumer.maxPollInterval"))
+				.isEqualTo(301000L);
 	}
 
 	@Test
@@ -418,13 +438,16 @@ public class EnableKafkaIntegrationTests {
 		this.kafkaJsonTemplate.send(new GenericMessage<>(new Foo("one")));
 		this.kafkaJsonTemplate.send(new GenericMessage<>(new Baz("two")));
 		this.kafkaJsonTemplate.send(new GenericMessage<>(new Qux("three")));
+		this.kafkaJsonTemplate.send(new GenericMessage<>(new ValidatedClass(5)));
 		assertThat(this.multiJsonListener.latch1.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.multiJsonListener.latch2.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.multiJsonListener.latch3.await(60, TimeUnit.SECONDS)).isTrue();
+		assertThat(this.multiJsonListener.latch4.await(60, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.multiJsonListener.foo.getBar()).isEqualTo("one");
 		assertThat(this.multiJsonListener.baz.getBar()).isEqualTo("two");
 		assertThat(this.multiJsonListener.bar.getBar()).isEqualTo("three");
 		assertThat(this.multiJsonListener.bar).isInstanceOf(Qux.class);
+		assertThat(this.multiJsonListener.validated.isValidated()).isTrue();
 	}
 
 	@Test
@@ -598,7 +621,7 @@ public class EnableKafkaIntegrationTests {
 	public void testValidation() throws Exception {
 		template.send("annotated35", 0, "{\"bar\":42}");
 		assertThat(this.listener.validationLatch.await(60, TimeUnit.SECONDS)).isTrue();
-		assertThat(this.listener.validationException).isInstanceOf(ValidationException.class);
+		assertThat(this.listener.validationException).isInstanceOf(MethodArgumentNotValidException.class);
 	}
 
 	@Test
@@ -761,9 +784,22 @@ public class EnableKafkaIntegrationTests {
 	@Test
 	public void testAddingTopics() {
 		int count = this.embeddedKafka.getTopics().size();
-		this.embeddedKafka.addTopics("testAddingTopics");
+		Map<String, Exception> results = this.embeddedKafka.addTopicsWithResults("testAddingTopics");
+		assertThat(results).hasSize(1);
+		assertThat(results.keySet().iterator().next()).isEqualTo("testAddingTopics");
+		assertThat(results.get("testAddingTopics")).isNull();
 		assertThat(this.embeddedKafka.getTopics().size()).isEqualTo(count + 1);
-		this.embeddedKafka.addTopics(new NewTopic("morePartitions", 10, (short) 1));
+		results = this.embeddedKafka.addTopicsWithResults("testAddingTopics");
+		assertThat(results).hasSize(1);
+		assertThat(results.keySet().iterator().next()).isEqualTo("testAddingTopics");
+		assertThat(results.get("testAddingTopics"))
+				.isInstanceOf(ExecutionException.class)
+				.hasCauseInstanceOf(TopicExistsException.class);
+		assertThat(this.embeddedKafka.getTopics().size()).isEqualTo(count + 1);
+		results = this.embeddedKafka.addTopicsWithResults(new NewTopic("morePartitions", 10, (short) 1));
+		assertThat(results).hasSize(1);
+		assertThat(results.keySet().iterator().next()).isEqualTo("morePartitions");
+		assertThat(results.get("morePartitions")).isNull();
 		assertThat(this.embeddedKafka.getTopics().size()).isEqualTo(count + 2);
 		assertThatIllegalArgumentException()
 				.isThrownBy(() -> this.embeddedKafka.addTopics(new NewTopic("morePartitions", 10, (short) 1)))
@@ -808,7 +844,7 @@ public class EnableKafkaIntegrationTests {
 					.count())
 						.isGreaterThan(0);
 
-			assertThat(this.meterRegistry.get("kafka.producer.node.incoming.byte.total")
+			assertThat(this.meterRegistry.get("kafka.producer.incoming.byte.total")
 					.tag("producerTag", "bytesString")
 					.tag("spring.id", "bytesStringProducerFactory.bsPF-1")
 					.functionCounter()
@@ -910,14 +946,7 @@ public class EnableKafkaIntegrationTests {
 		@SuppressWarnings("unchecked")
 		@Bean
 		public MeterRegistry meterRegistry() {
-			SimpleMeterRegistry reg = new SimpleMeterRegistry();
-			List<java.util.function.Consumer<Meter>> al =
-					KafkaTestUtils.getPropertyValue(reg, "meterAddedListeners", List.class);
-			List<java.util.function.Consumer<Meter>> rl =
-					KafkaTestUtils.getPropertyValue(reg, "meterRemovedListeners", List.class);
-			al.add(meter -> logger.warn("Added:   " + meter.getId()));
-			rl.add(meter -> logger.warn("Removed: " + meter.getId()));
-			return reg;
+			return new SimpleMeterRegistry();
 		}
 
 		@Bean
@@ -1201,7 +1230,6 @@ public class EnableKafkaIntegrationTests {
 			return factory;
 		}
 
-		@SuppressWarnings("deprecation")
 		@Bean
 		public KafkaListenerContainerFactory<ConcurrentMessageListenerContainer<Integer, String>>
 				recordAckListenerContainerFactory() {
@@ -1211,7 +1239,6 @@ public class EnableKafkaIntegrationTests {
 			factory.setConsumerFactory(configuredConsumerFactory("clientIdViaProps4"));
 			ContainerProperties props = factory.getContainerProperties();
 			props.setAckMode(AckMode.RECORD);
-			props.setAckOnError(true);
 			factory.setErrorHandler(listen16ErrorHandler());
 			return factory;
 		}
@@ -1259,6 +1286,13 @@ public class EnableKafkaIntegrationTests {
 		@Bean
 		public IfaceListener<String> ifaceListener() {
 			return new IfaceListenerImpl();
+		}
+
+		@Bean
+		@Order(Ordered.HIGHEST_PRECEDENCE)
+		@Role(BeanDefinition.ROLE_INFRASTRUCTURE)
+		public ProxyListenerPostProcessor proxyListenerPostProcessor() {
+			return new ProxyListenerPostProcessor();
 		}
 
 		@Bean
@@ -1526,7 +1560,12 @@ public class EnableKafkaIntegrationTests {
 
 				@Override
 				public void validate(Object target, Errors errors) {
-					throw new ValidationException();
+					if (target instanceof ValidatedClass && ((ValidatedClass) target).getBar() > 10) {
+						errors.reject("bar too large");
+					}
+					else {
+						((ValidatedClass) target).setValidated(true);
+					}
 				}
 
 				@Override
@@ -1621,6 +1660,8 @@ public class EnableKafkaIntegrationTests {
 
 		final CountDownLatch eventLatch = new CountDownLatch(1);
 
+		final CountDownLatch noLongerIdleEventLatch = new CountDownLatch(1);
+
 		final CountDownLatch keyLatch = new CountDownLatch(1);
 
 		final AtomicBoolean reposition12 = new AtomicBoolean();
@@ -1651,6 +1692,8 @@ public class EnableKafkaIntegrationTests {
 
 		volatile ListenerContainerIdleEvent event;
 
+		volatile ListenerContainerNoLongerIdleEvent noLongerIdleEvent;
+
 		volatile List<Integer> keys;
 
 		volatile List<Integer> partitions;
@@ -1676,7 +1719,9 @@ public class EnableKafkaIntegrationTests {
 		volatile CustomMethodArgument customMethodArgument;
 
 		@KafkaListener(id = "manualStart", topics = "manualStart",
-				containerFactory = "kafkaAutoStartFalseListenerContainerFactory")
+				containerFactory = "kafkaAutoStartFalseListenerContainerFactory",
+				properties = { ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG + ":301000",
+						ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG + ":59000" })
 		public void manualStart(String foo) {
 		}
 
@@ -1737,6 +1782,12 @@ public class EnableKafkaIntegrationTests {
 		public void eventHandler(ListenerContainerIdleEvent event) {
 			this.event = event;
 			eventLatch.countDown();
+		}
+
+		@EventListener(condition = "event.listenerId.startsWith('qux')")
+		public void eventHandler(ListenerContainerNoLongerIdleEvent event) {
+			this.noLongerIdleEvent = event;
+			noLongerIdleEventLatch.countDown();
 		}
 
 		@KafkaListener(id = "fiz", topicPartitions = {
@@ -1983,6 +2034,27 @@ public class EnableKafkaIntegrationTests {
 
 	}
 
+	static class ProxyListenerPostProcessor implements BeanPostProcessor {
+
+		@Override
+		public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+			if ("multiListenerSendTo".equals(beanName)) {
+				ProxyFactory proxyFactory = new ProxyFactory(bean);
+				proxyFactory.setProxyTargetClass(true);
+				proxyFactory.addAdvice(new MethodInterceptor() {
+					@Override
+					public Object invoke(MethodInvocation invocation) throws Throwable {
+						logger.info(String.format("Proxy listener for %s.$s",
+								invocation.getMethod().getDeclaringClass(), invocation.getMethod().getName()));
+						return invocation.proceed();
+					}
+				});
+				return proxyFactory.getProxy();
+			}
+			return bean;
+		}
+	}
+
 	public static class SeekToLastOnIdleListener extends AbstractConsumerSeekAware {
 
 		private final CountDownLatch latch1 = new CountDownLatch(10);
@@ -2113,17 +2185,21 @@ public class EnableKafkaIntegrationTests {
 	@KafkaListener(id = "multiJson", topics = "annotated33", containerFactory = "kafkaJsonListenerContainerFactory2")
 	static class MultiJsonListenerBean {
 
-		private final CountDownLatch latch1 = new CountDownLatch(1);
+		final CountDownLatch latch1 = new CountDownLatch(1);
 
-		private final CountDownLatch latch2 = new CountDownLatch(1);
+		final CountDownLatch latch2 = new CountDownLatch(1);
 
-		private final CountDownLatch latch3 = new CountDownLatch(1);
+		final CountDownLatch latch3 = new CountDownLatch(1);
 
-		private Foo foo;
+		final CountDownLatch latch4 = new CountDownLatch(1);
 
-		private Baz baz;
+		volatile Foo foo;
 
-		private Bar bar;
+		volatile Baz baz;
+
+		volatile Bar bar;
+
+		volatile ValidatedClass validated;
 
 		@KafkaHandler
 		public void bar(Foo foo) {
@@ -2135,6 +2211,12 @@ public class EnableKafkaIntegrationTests {
 		public void bar(Baz baz) {
 			this.baz = baz;
 			this.latch2.countDown();
+		}
+
+		@KafkaHandler
+		public void bar(@Valid ValidatedClass val) {
+			this.validated = val;
+			this.latch4.countDown();
 		}
 
 		@KafkaHandler(isDefault = true)
@@ -2273,12 +2355,30 @@ public class EnableKafkaIntegrationTests {
 		@Max(10)
 		private int bar;
 
+		private volatile boolean validated;
+
+
+		public ValidatedClass() {
+		}
+
+		public ValidatedClass(int bar) {
+			this.bar = bar;
+		}
+
 		public int getBar() {
 			return this.bar;
 		}
 
 		public void setBar(int bar) {
 			this.bar = bar;
+		}
+
+		public boolean isValidated() {
+			return this.validated;
+		}
+
+		public void setValidated(boolean validated) {
+			this.validated = validated;
 		}
 
 	}

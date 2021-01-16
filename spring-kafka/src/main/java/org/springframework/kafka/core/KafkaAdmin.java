@@ -133,16 +133,6 @@ public class KafkaAdmin extends KafkaResourceFactory implements ApplicationConte
 	/**
 	 * Get an unmodifiable copy of this admin's configuration.
 	 * @return the configuration map.
-	 * @deprecated in favor of {@link #getConfigurationProperties()}.
-	 */
-	@Deprecated
-	public Map<String, Object> getConfig() {
-		return getConfigurationProperties();
-	}
-
-	/**
-	 * Get an unmodifiable copy of this admin's configuration.
-	 * @return the configuration map.
 	 */
 	public Map<String, Object> getConfigurationProperties() {
 		Map<String, Object> configs2 = new HashMap<>(this.configs);
@@ -234,7 +224,7 @@ public class KafkaAdmin extends KafkaResourceFactory implements ApplicationConte
 			NewTopic topic = topicNameToTopic.get(n);
 			try {
 				TopicDescription topicDescription = f.get(this.operationTimeout, TimeUnit.SECONDS);
-				if (topic.numPartitions() < topicDescription.partitions().size()) {
+				if (topic.numPartitions() >= 0 && topic.numPartitions() < topicDescription.partitions().size()) {
 					LOGGER.info(() -> String.format(
 						"Topic '%s' exists but has a different partition count: %d not %d", n,
 						topicDescription.partitions().size(), topic.numPartitions()));

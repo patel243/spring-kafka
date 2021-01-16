@@ -29,13 +29,13 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -326,7 +326,6 @@ public class DefaultKafkaConsumerFactoryTests {
 	@Test
 	public void testNestedTxProducerIsCached() throws Exception {
 		Map<String, Object> producerProps = KafkaTestUtils.producerProps(this.embeddedKafka);
-		producerProps.put(ProducerConfig.RETRIES_CONFIG, 1);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(producerProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf);
 		DefaultKafkaProducerFactory<Integer, String> pfTx = new DefaultKafkaProducerFactory<>(producerProps);
@@ -334,6 +333,11 @@ public class DefaultKafkaConsumerFactoryTests {
 		KafkaTemplate<Integer, String> templateTx = new KafkaTemplate<>(pfTx);
 		Map<String, Object> consumerProps = KafkaTestUtils.consumerProps("txCache1Group", "false", this.embeddedKafka);
 		DefaultKafkaConsumerFactory<Integer, String> cf = new DefaultKafkaConsumerFactory<>(consumerProps);
+		AtomicBoolean ppCalled = new AtomicBoolean();
+		cf.addPostProcessor(consumer -> {
+			ppCalled.set(true);
+			return consumer;
+		});
 		ContainerProperties containerProps = new ContainerProperties("txCache1");
 		CountDownLatch latch = new CountDownLatch(1);
 		containerProps.setMessageListener((MessageListener<Integer, String>) r -> {
@@ -360,13 +364,13 @@ public class DefaultKafkaConsumerFactoryTests {
 			pf.destroy();
 			pfTx.destroy();
 		}
+		assertThat(ppCalled.get()).isTrue();
 	}
 
 	@SuppressWarnings("unchecked")
 	@Test
 	public void testContainerTxProducerIsNotCached() throws Exception {
 		Map<String, Object> producerProps = KafkaTestUtils.producerProps(this.embeddedKafka);
-		producerProps.put(ProducerConfig.RETRIES_CONFIG, 1);
 		DefaultKafkaProducerFactory<Integer, String> pf = new DefaultKafkaProducerFactory<>(producerProps);
 		KafkaTemplate<Integer, String> template = new KafkaTemplate<>(pf);
 		DefaultKafkaProducerFactory<Integer, String> pfTx = new DefaultKafkaProducerFactory<>(producerProps);

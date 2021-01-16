@@ -26,6 +26,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import org.apache.kafka.common.errors.SerializationException;
@@ -42,6 +43,9 @@ import org.springframework.kafka.support.converter.Jackson2JavaTypeMapper.TypePr
 import org.springframework.kafka.support.serializer.testentities.DummyEntity;
 import org.springframework.kafka.test.utils.KafkaTestUtils;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JavaType;
@@ -225,6 +229,16 @@ public class JsonSerializationTests {
 	}
 
 	@Test
+	void testDeserializerTypeForcedType() {
+		JsonSerializer<List<Parent>> ser = new JsonSerializer<>(new TypeReference<List<Parent>>() { });
+		JsonDeserializer<List<Parent>> de = new JsonDeserializer<>(new TypeReference<List<Parent>>() { });
+		List<Parent> dummy = Arrays.asList(new Child(1), new Parent(2));
+		assertThat(de.deserialize(this.topic, ser.serialize(this.topic, dummy))).isEqualTo(dummy);
+		ser.close();
+		de.close();
+	}
+
+	@Test
 	void jsonNode() throws IOException {
 		JsonSerializer<Object> ser = new JsonSerializer<>();
 		JsonDeserializer<JsonNode> de = new JsonDeserializer<>();
@@ -296,6 +310,24 @@ public class JsonSerializationTests {
 	}
 
 	@Test
+	void testTypeResolverViaProperties() {
+		JsonDeserializer<Object> deser = new JsonDeserializer<>();
+		Map<String, Object> props = new HashMap<>();
+		props.put(JsonDeserializer.KEY_TYPE_METHOD, getClass().getName() + ".stringTypeForTopic");
+		props.put(JsonDeserializer.VALUE_TYPE_METHOD, getClass().getName() + ".fooBarJavaTypeForTopic");
+		props.put(JsonDeserializer.TRUSTED_PACKAGES, "*");
+		deser.configure(props, false);
+		assertThat(deser.deserialize("", "{\"foo\":\"bar\"}".getBytes())).isInstanceOf(Foo.class);
+		assertThat(deser.deserialize("", new RecordHeaders(), "{\"bar\":\"baz\"}".getBytes()))
+				.isInstanceOf(Bar.class);
+
+		deser.configure(props, true);
+		assertThat(deser.deserialize("", new RecordHeaders(), "\"foo\"".getBytes()))
+				.isEqualTo("foo");
+		deser.close();
+	}
+
+	@Test
 	void testTypeFunctionDirect() {
 		JsonDeserializer<Object> deser = new JsonDeserializer<>()
 				.trustedPackages("*")
@@ -304,6 +336,31 @@ public class JsonSerializationTests {
 		assertThat(deser.deserialize("", new RecordHeaders(), "{\"bar\":\"baz\"}".getBytes()))
 				.isInstanceOf(Bar.class);
 		deser.close();
+	}
+
+	@Test
+	void testTypeResolverDirect() {
+		JsonDeserializer<Object> deser = new JsonDeserializer<>()
+				.trustedPackages("*")
+				.typeResolver(JsonSerializationTests::fooBarJavaTypeForTopic);
+		assertThat(deser.deserialize("", "{\"foo\":\"bar\"}".getBytes())).isInstanceOf(Foo.class);
+		assertThat(deser.deserialize("", new RecordHeaders(), "{\"bar\":\"baz\"}".getBytes()))
+				.isInstanceOf(Bar.class);
+		deser.close();
+	}
+
+	@Test
+	void testCopyWithType() {
+		JsonDeserializer<Object> deser = new JsonDeserializer<>();
+		JsonSerializer<Object> ser = new JsonSerializer<>();
+		JsonDeserializer<Parent> typedDeser = deser.copyWithType(Parent.class);
+		JsonSerializer<Parent> typedSer = ser.copyWithType(Parent.class);
+		Child serializedValue = new Child(1);
+		assertThat(typedDeser.deserialize("", typedSer.serialize("", serializedValue))).isEqualTo(serializedValue);
+		deser.close();
+		ser.close();
+		typedDeser.close();
+		typedSer.close();
 	}
 
 	public static JavaType fooBarJavaType(byte[] data, Headers headers) {
@@ -315,7 +372,20 @@ public class JsonSerializationTests {
 		}
 	}
 
+	public static JavaType fooBarJavaTypeForTopic(String topic, byte[] data, Headers headers) {
+		if (data[0] == '{' && data[1] == 'f') {
+			return TypeFactory.defaultInstance().constructType(Foo.class);
+		}
+		else {
+			return TypeFactory.defaultInstance().constructType(Bar.class);
+		}
+	}
+
 	public static JavaType stringType(byte[] data, Headers headers) {
+		return TypeFactory.defaultInstance().constructType(String.class);
+	}
+
+	public static JavaType stringTypeForTopic(String topic, byte[] data, Headers headers) {
 		return TypeFactory.defaultInstance().constructType(String.class);
 	}
 
@@ -338,5 +408,44 @@ public class JsonSerializationTests {
 		public String bar = "bar";
 
 	}
+
+	@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+	@JsonSubTypes({
+		@JsonSubTypes.Type(value = Parent.class, name = "parent"),
+		@JsonSubTypes.Type(value = Child.class, name = "child")
+	})
+	public static class Parent {
+		@JsonProperty
+		private int number;
+
+		Parent() { }
+
+		Parent(int number) {
+			this.number = number;
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (o == null || !getClass().equals(o.getClass())) {
+				return false;
+			}
+			Parent parent = (Parent) o;
+			return number == parent.number;
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(number);
+		}
+	}
+
+	public static class Child extends Parent {
+		Child() { }
+
+		Child(int number) {
+			super(number);
+		}
+	}
+
 
 }

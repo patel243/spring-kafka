@@ -1,6 +1,8 @@
 buildscript {
-	ext.kotlinVersion = '1.3.61'
+	ext.kotlinVersion = '1.4.20'
 	repositories {
+		mavenCentral()
+		maven { url 'https://plugins.gradle.org/m2' }
 		maven { url 'https://repo.spring.io/plugins-release' }
 	}
 	dependencies {
@@ -15,12 +17,12 @@ plugins {
 	id 'idea'
 	id 'org.sonarqube' version '2.8'
 	id 'org.ajoberstar.grgit' version '4.0.1' apply false
-	id 'io.spring.nohttp' version '0.0.4.RELEASE'
-	id 'io.spring.dependency-management' version '1.0.9.RELEASE' apply false
-	id 'com.jfrog.artifactory' version '4.13.0' apply false
-	id 'org.asciidoctor.jvm.pdf' version '3.1.0'
-	id 'org.asciidoctor.jvm.gems' version '3.1.0'
-	id 'org.asciidoctor.jvm.convert' version '3.1.0'
+	id 'io.spring.nohttp' version '0.0.5.RELEASE'
+	id 'io.spring.dependency-management' version '1.0.10.RELEASE' apply false
+	id 'com.jfrog.artifactory' version '4.18.2' apply false
+	id 'org.asciidoctor.jvm.pdf' version '3.3.0'
+	id 'org.asciidoctor.jvm.gems' version '3.3.0'
+	id 'org.asciidoctor.jvm.convert' version '3.3.0'
 }
 
 apply plugin: 'io.spring.nohttp'
@@ -40,7 +42,7 @@ ext {
 	linkScmUrl = 'https://github.com/spring-projects/spring-kafka'
 	linkScmConnection = 'https://github.com/spring-projects/spring-kafka.git'
 	linkScmDevConnection = 'git@github.com:spring-projects/spring-kafka.git'
-	docResourcesVersion = '0.2.1.RELEASE'
+	docResourcesVersion = '0.2.4'
 
 
 	if (gitPresent) {
@@ -48,23 +50,24 @@ ext {
 			files(grgit.status().unstaged.modified).filter{ f -> f.name.endsWith('.java') || f.name.endsWith('.kt') }
 	}
 
-	assertjVersion = '3.16.1'
+	assertjVersion = '3.18.1'
+	awaitilityVersion = '4.0.3'
 	googleJsr305Version = '3.0.2'
 	hamcrestVersion = '2.2'
-	hibernateValidationVersion = '6.1.5.Final'
-	jacksonVersion = '2.11.0'
+	hibernateValidationVersion = '6.1.6.Final'
+	jacksonBomVersion = '2.12.0'
 	jaywayJsonPathVersion = '2.4.0'
-	junit4Version = '4.13'
-	junitJupiterVersion = '5.6.2'
-	kafkaVersion = '2.5.0'
-	log4jVersion = '2.13.2'
-	micrometerVersion = '1.5.1'
-	mockitoVersion = '3.3.3'
-	reactorVersion = 'Dysprosium-SR7'
-	scalaVersion = '2.12'
-	springDataCommonsVersion = '2.3.0.RELEASE'
-	springRetryVersion = '1.2.5.RELEASE'
-	springVersion = '5.2.6.RELEASE'
+	junit4Version = '4.13.1'
+	junitJupiterVersion = '5.7.0'
+	kafkaVersion = '2.7.0'
+	log4jVersion = '2.14.0'
+	micrometerVersion = '1.6.1'
+	mockitoVersion = '3.6.28'
+	reactorVersion = '2020.0.2'
+	scalaVersion = '2.13'
+	springDataVersion = '2021.0.0-M1'
+	springRetryVersion = '1.3.0'
+	springVersion = '5.3.2'
 
 	idPrefix = 'kafka'
 }
@@ -89,16 +92,18 @@ allprojects {
 		}
 
 		imports {
-			mavenBom "com.fasterxml.jackson:jackson-bom:$jacksonVersion"
+			mavenBom "com.fasterxml.jackson:jackson-bom:$jacksonBomVersion"
 			mavenBom "org.junit:junit-bom:$junitJupiterVersion"
 			mavenBom "org.springframework:spring-framework-bom:$springVersion"
 			mavenBom "io.projectreactor:reactor-bom:$reactorVersion"
+			mavenBom "org.springframework.data:spring-data-bom:$springDataVersion"
 		}
 	}
 
 	repositories {
+		mavenCentral()
 		maven { url 'https://repo.spring.io/libs-milestone' }
-		if (version.endsWith('BUILD-SNAPSHOT')) {
+		if (version.endsWith('SNAPSHOT')) {
 			maven { url 'https://repo.spring.io/libs-snapshot' }
 		}
 //		maven { url 'https://repository.apache.org/content/groups/staging/' }
@@ -133,6 +138,10 @@ subprojects { subproject ->
 		targetCompatibility = 1.8
 	}
 
+	compileTestJava {
+		sourceCompatibility = 11
+	}
+
 	compileTestKotlin {
 		kotlinOptions {
 			jvmTarget = '1.8'
@@ -142,7 +151,7 @@ subprojects { subproject ->
 	eclipse.project.natures += 'org.springframework.ide.eclipse.core.springnature'
 
 	jacoco {
-		toolVersion = '0.8.5'
+		toolVersion = '0.8.6'
 	}
 
 	// dependencies that are common across all java projects
@@ -159,6 +168,10 @@ subprojects { subproject ->
 
 		testImplementation 'org.jetbrains.kotlin:kotlin-reflect'
 		testImplementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8'
+		testImplementation("org.awaitility:awaitility:$awaitilityVersion") {
+			exclude group: 'org.hamcrest'
+		}
+		testImplementation "org.hamcrest:hamcrest-core:$hamcrestVersion"
 		optionalApi "org.assertj:assertj-core:$assertjVersion"
 	}
 
@@ -169,6 +182,7 @@ subprojects { subproject ->
 		// suppress all console output during testing unless running `gradle -i`
 		logging.captureStandardOutput(LogLevel.INFO)
 		maxHeapSize = '1536m'
+//		jvmArgs '-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:8111'
 		jacoco {
 			destinationFile = file("$buildDir/jacoco.exec")
 		}
@@ -177,7 +191,7 @@ subprojects { subproject ->
 
 	checkstyle {
 		configDirectory.set(rootProject.file("src/checkstyle"))
-		toolVersion = '8.24'
+		toolVersion = '8.38'
 	}
 
 	jacocoTestReport {
@@ -212,7 +226,7 @@ subprojects { subproject ->
 	}
 
 	task updateCopyrights {
-		onlyIf { gitPresent && !System.getenv('TRAVIS') && !System.getenv('bamboo_buildKey') }
+		onlyIf { gitPresent && !System.getenv('GITHUB_ACTION') && !System.getenv('bamboo_buildKey') }
 		if (gitPresent) {
 			inputs.files(modifiedFiles.filter { f -> f.path.contains(subproject.name) })
 		}
@@ -284,7 +298,7 @@ project ('spring-kafka') {
 		optionalApi 'com.fasterxml.jackson.core:jackson-databind'
 
 		// Spring Data projection message binding support
-		optionalApi ("org.springframework.data:spring-data-commons:$springDataCommonsVersion") {
+		optionalApi ("org.springframework.data:spring-data-commons") {
 			exclude group: 'org.springframework'
 		}
 		optionalApi "com.jayway.jsonpath:json-path:$jaywayJsonPathVersion"

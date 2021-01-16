@@ -17,6 +17,8 @@
 package org.springframework.kafka.core;
 
 import java.time.Duration;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -81,7 +83,6 @@ public interface ProducerFactory<K, V> {
 	 * @since 1.3.8
 	 */
 	default void closeProducerFor(String transactionIdSuffix) {
-		// NOSONAR
 	}
 
 	/**
@@ -99,7 +100,6 @@ public interface ProducerFactory<K, V> {
 	 * @since 2.3
 	 */
 	default void closeThreadBoundProducer() {
-		// NOSONAR
 	}
 
 	/**
@@ -107,7 +107,6 @@ public interface ProducerFactory<K, V> {
 	 * @since 2.4
 	 */
 	default void reset() {
-		// NOSONAR
 	}
 
 	/**
@@ -166,6 +165,89 @@ public interface ProducerFactory<K, V> {
 	 */
 	default Duration getPhysicalCloseTimeout() {
 		return DEFAULT_PHYSICAL_CLOSE_TIMEOUT;
+	}
+
+	/**
+	 * Add a listener.
+	 * @param listener the listener.
+	 * @since 2.5.3
+	 */
+	default void addListener(Listener<K, V> listener) {
+
+	}
+
+	/**
+	 * Add a listener at a specific index.
+	 * @param index the index (list position).
+	 * @param listener the listener.
+	 * @since 2.5.3
+	 */
+	default void addListener(int index, Listener<K, V> listener) {
+
+	}
+
+	/**
+	 * Remove a listener.
+	 * @param listener the listener.
+	 * @return true if removed.
+	 * @since 2.5.3
+	 */
+	default boolean removeListener(Listener<K, V> listener) {
+		return false;
+	}
+
+	/**
+	 * Get the current list of listeners.
+	 * @return the listeners.
+	 * @since 2.5.3
+	 */
+	default List<Listener<K, V>> getListeners() {
+		return Collections.emptyList();
+	}
+
+	/**
+	 * Add a post processor.
+	 * @param postProcessor the post processor.
+	 * @since 2.5.3
+	 */
+	default void addPostProcessor(ProducerPostProcessor<K, V> postProcessor) {
+
+	}
+
+	/**
+	 * Remove a post processor.
+	 * @param postProcessor the post processor.
+	 * @return true if removed.
+	 * @since 2.5.3
+	 */
+	default boolean removePostProcessor(ProducerPostProcessor<K, V> postProcessor) {
+		return false;
+	}
+
+	/**
+	 * Get the current list of post processors.
+	 * @return the post processors.
+	 * @since 2.5.3
+	 */
+	default List<ProducerPostProcessor<K, V>> getPostProcessors() {
+		return Collections.emptyList();
+	}
+
+	/**
+	 * Update the producer configuration map; useful for situations such as
+	 * credential rotation.
+	 * @param updates the configuration properties to update.
+	 * @since 2.5.10
+	 */
+	default void updateConfigs(Map<String, Object> updates) {
+	}
+
+	/**
+	 * Remove the specified key from the configuration map.
+	 * @param configKey the key to remove.
+	 * @since 2.5.10
+	 */
+	default void removeConfig(String configKey) {
 	}
 
 	/**

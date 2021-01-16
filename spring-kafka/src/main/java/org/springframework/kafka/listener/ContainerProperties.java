@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,19 +17,29 @@
 package org.springframework.kafka.listener;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Pattern;
 
+import org.aopalliance.aop.Advice;
+
+import org.springframework.aop.framework.Advised;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.core.task.AsyncListenableTaskExecutor;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.kafka.support.TopicPartitionOffset;
 import org.springframework.lang.Nullable;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
 
 /**
  * Contains runtime properties for a listener container.
@@ -39,6 +49,7 @@ import org.springframework.util.Assert;
  * @author Artem Yakshin
  * @author Johnny Lim
  * @author Lukasz Kaminski
+ * @author Kyuhyeok Park
  */
 public class ContainerProperties extends ConsumerProperties {
 
@@ -163,6 +174,8 @@ public class ContainerProperties extends ConsumerProperties {
 
 	private final Map<String, String> micrometerTags = new HashMap<>();
 
+	private final List<Advice> adviceChain = new ArrayList<>();
+
 	/**
 	 * The ack mode to use when auto ack (in the configuration properties) is false.
 	 * <ul>
@@ -210,8 +223,6 @@ public class ContainerProperties extends ConsumerProperties {
 	 */
 	private long shutdownTimeout = DEFAULT_SHUTDOWN_TIMEOUT;
 
-	private boolean ackOnError = false;
-
 	private Long idleEventInterval;
 
 	private PlatformTransactionManager transactionManager;
@@ -230,7 +241,7 @@ public class ContainerProperties extends ConsumerProperties {
 
 	private boolean micrometerEnabled = true;
 
-	private Duration consumerStartTimout = DEFAULT_CONSUMER_START_TIMEOUT;
+	private Duration consumerStartTimeout = DEFAULT_CONSUMER_START_TIMEOUT;
 
 	private Boolean subBatchPerPartition;
 
@@ -238,7 +249,13 @@ public class ContainerProperties extends ConsumerProperties {
 
 	private boolean deliveryAttemptHeader;
 
-	private EOSMode eosMode;
+	private EOSMode eosMode = EOSMode.BETA;
+
+	private TransactionDefinition transactionDefinition;
+
+	private boolean stopContainerWhenFenced;
+
+	private boolean stopImmediate;
 
 	/**
 	 * Create properties for a container that will subscribe to the specified topics.
@@ -277,6 +294,7 @@ public class ContainerProperties extends ConsumerProperties {
 	 */
 	public void setMessageListener(Object messageListener) {
 		this.messageListener = messageListener;
+		adviseListenerIfNeeded();
 	}
 
 	/**
@@ -294,6 +312,10 @@ public class ContainerProperties extends ConsumerProperties {
 	 * Ignored when transactions are being used. Transactional consumers commit offsets
 	 * with semantics equivalent to {@code RECORD} or {@code BATCH}, depending on
 	 * the listener type.
+	 * However, setting it to {@code MANUAL} will provide access to an
+	 * {@code Acknowledgement} in the listener; when calling its
+	 * {@code nack(index, sleeptime)} method, the container will send the offsets of
+	 * the succcessfully processed records in the batch to the transaction.
 	 * @param ackMode the {@link AckMode}; default BATCH.
 	 * @see #setTransactionManager(PlatformTransactionManager)
 	 */
@@ -369,34 +391,6 @@ public class ContainerProperties extends ConsumerProperties {
 		this.idleEventInterval = idleEventInterval;
 	}
 
-	/**
-	 * Set whether or not the container should commit offsets (ack messages) where the
-	 * listener throws exceptions. This works in conjunction with {@link #ackMode} and is
-	 * effective only when the kafka property {@code enable.auto.commit} is {@code false};
-	 * it is not applicable to manual ack modes. When this property is set to
-	 * {@code true}, all messages handled will have their offset committed. When set to
-	 * {@code false} (the default), offsets will be committed only for successfully
-	 * handled messages. Manual acks will always be applied. Bear in mind that, if the
-	 * next message is successfully handled, its offset will be committed, effectively
-	 * committing the offset of the failed message anyway, so this option has limited
-	 * applicability, unless you are using a {@code SeekToCurrentBatchErrorHandler} which
-	 * will seek the current record so that it is reprocessed.
-	 * <p>
-	 * Does not apply when transactions are used - in that case, whether or not the
-	 * offsets are sent to the transaction depends on whether the transaction is committed
-	 * or rolled back. If a listener throws an exception, the transaction will normally be
-	 * rolled back unless an error handler is provided that handles the error and exits
-	 * normally; in which case the offsets are sent to the transaction and the transaction
-	 * is committed.
-	 * @deprecated in favor of {@code GenericErrorHandler.isAckAfterHandle()}.
-	 * @param ackOnError whether the container should acknowledge messages that throw
-	 * exceptions.
-	 */
-	@Deprecated
-	public void setAckOnError(boolean ackOnError) {
-		this.ackOnError = ackOnError;
-	}
-
 	public AckMode getAckMode() {
 		return this.ackMode;
 	}
@@ -423,11 +417,6 @@ public class ContainerProperties extends ConsumerProperties {
 
 	public Long getIdleEventInterval() {
 		return this.idleEventInterval;
-	}
-
-	public boolean isAckOnError() {
-		return this.ackOnError &&
-				!(AckMode.MANUAL_IMMEDIATE.equals(this.ackMode) || AckMode.MANUAL.equals(this.ackMode));
 	}
 
 	public PlatformTransactionManager getTransactionManager() {
@@ -573,18 +562,28 @@ public class ContainerProperties extends ConsumerProperties {
 		return Collections.unmodifiableMap(this.micrometerTags);
 	}
 
+	public Duration getConsumerStartTimeout() {
+		return this.consumerStartTimeout;
+	}
+
+	@Deprecated
 	public Duration getConsumerStartTimout() {
-		return this.consumerStartTimout;
+		return this.consumerStartTimeout;
 	}
 
 	/**
 	 * Set the timeout to wait for a consumer thread to start before logging
 	 * an error. Default 30 seconds.
-	 * @param consumerStartTimout the consumer start timeout.
+	 * @param consumerStartTimeout the consumer start timeout.
 	 */
-	public void setConsumerStartTimout(Duration consumerStartTimout) {
-		Assert.notNull(consumerStartTimout, "'consumerStartTimout' cannot be null");
-		this.consumerStartTimout = consumerStartTimout;
+	public void setConsumerStartTimeout(Duration consumerStartTimeout) {
+		Assert.notNull(consumerStartTimeout, "'consumerStartTimout' cannot be null");
+		this.consumerStartTimeout = consumerStartTimeout;
+	}
+
+	@Deprecated
+	public void setConsumerStartTimout(Duration consumerStartTimeout) {
+		setConsumerStartTimeout(consumerStartTimeout);
 	}
 
 	/**
@@ -665,20 +664,120 @@ public class ContainerProperties extends ConsumerProperties {
 	 * Set the exactly once semantics mode. When {@link EOSMode#ALPHA} a producer per
 	 * group/topic/partition is used (enabling 'transactional.id fencing`).
 	 * {@link EOSMode#BETA} enables fetch-offset-request fencing, and requires brokers 2.5
-	 * or later. In the 2.6 client, the default will be BETA because the 2.6 client can
+	 * or later. With the 2.6 client, the default is now BETA because the 2.6 client can
 	 * automatically fall back to ALPHA.
-	 * @param eosMode the mode; default ALPHA.
+	 * @param eosMode the mode; default BETA.
 	 * @since 2.5
 	 */
 	public void setEosMode(EOSMode eosMode) {
-		if (eosMode == null) {
-			this.eosMode = EOSMode.ALPHA;
+		Assert.notNull(eosMode, "'eosMode' cannot be null");
+		this.eosMode = eosMode;
+	}
+
+	/**
+	 * Get the transaction definition.
+	 * @return the definition.
+	 * @since 2.5.4
+	 */
+	@Nullable
+	public TransactionDefinition getTransactionDefinition() {
+		return this.transactionDefinition;
+	}
+
+	/**
+	 * Set a transaction definition with properties (e.g. timeout) that will be copied to
+	 * the container's transaction template. Note that this is only generally useful when
+	 * used with a
+	 * {@link org.springframework.kafka.transaction.ChainedKafkaTransactionManager}
+	 * configured with a non-Kafka transaction manager. Kafka has no concept of
+	 * transaction timeout, for example.
+	 * @param transactionDefinition the definition.
+	 * @since 2.5.4
+	 */
+	public void setTransactionDefinition(TransactionDefinition transactionDefinition) {
+		this.transactionDefinition = transactionDefinition;
+	}
+
+	/**
+	 * A chain of listener {@link Advice}s.
+	 * @return the adviceChain.
+	 * @since 2.5.6
+	 */
+	public Advice[] getAdviceChain() {
+		return this.adviceChain.toArray(new Advice[0]);
+	}
+
+	/**
+	 * Set a chain of listener {@link Advice}s; must not be null or have null elements.
+	 * @param adviceChain the adviceChain to set.
+	 * @since 2.5.6
+	 */
+	public void setAdviceChain(Advice... adviceChain) {
+		Assert.notNull(adviceChain, "'adviceChain' cannot be null");
+		Assert.noNullElements(adviceChain, "'adviceChain' cannot have null elements");
+		this.adviceChain.clear();
+		this.adviceChain.addAll(Arrays.asList(adviceChain));
+		if (this.messageListener != null) {
+			adviseListenerIfNeeded();
 		}
-		else {
-			this.eosMode = eosMode;
-		}
-		if (this.eosMode.equals(EOSMode.BETA) && this.subBatchPerPartition == null) {
-			this.subBatchPerPartition = false;
+	}
+
+	/**
+	 * When true, the container will stop after a
+	 * {@link org.apache.kafka.common.errors.ProducerFencedException}.
+	 * @return the stopContainerWhenFenced
+	 * @since 2.5.8
+	 */
+	public boolean isStopContainerWhenFenced() {
+		return this.stopContainerWhenFenced;
+	}
+
+	/**
+	 * Set to true to stop the container when a
+	 * {@link org.apache.kafka.common.errors.ProducerFencedException} is thrown.
+	 * Currently, there is no way to determine if such an exception is thrown due to a
+	 * rebalance Vs. a timeout. We therefore cannot call the after rollback processor. The
+	 * best solution is to ensure that the {@code transaction.timeout.ms} is large enough
+	 * so that transactions don't time out.
+	 * @param stopContainerWhenFenced true to stop the container.
+	 * @since 2.5.8
+	 */
+	public void setStopContainerWhenFenced(boolean stopContainerWhenFenced) {
+		this.stopContainerWhenFenced = stopContainerWhenFenced;
+	}
+
+	/**
+	 * When true, the container will be stopped immediately after processing the current record.
+	 * @return true to stop immediately.
+	 * @since 2.5.11
+	 */
+	public boolean isStopImmediate() {
+		return this.stopImmediate;
+	}
+
+	/**
+	 * Set to true to stop the container after processing the current record (when stop()
+	 * is called). When false (default), the container will stop after all the results of
+	 * the previous poll are processed.
+	 * @param stopImmediate true to stop after the current record.
+	 * @since 2.5.11
+	 */
+	public void setStopImmediate(boolean stopImmediate) {
+		this.stopImmediate = stopImmediate;
+	}
+
+	private void adviseListenerIfNeeded() {
+		if (!CollectionUtils.isEmpty(this.adviceChain)) {
+			if (AopUtils.isAopProxy(this.messageListener)) {
+				Advised advised = (Advised) this.messageListener;
+				this.adviceChain.forEach(advised::removeAdvice);
+				this.adviceChain.forEach(advised::addAdvice);
+			}
+			else {
+				ProxyFactory pf = new ProxyFactory(this.messageListener);
+				this.adviceChain.forEach(pf::addAdvice);
+				this.messageListener = pf.getProxy();
+			}
 		}
 	}
 
@@ -694,7 +793,6 @@ public class ContainerProperties extends ConsumerProperties {
 						? ", consumerTaskExecutor=" + this.consumerTaskExecutor
 						: "")
 				+ ", shutdownTimeout=" + this.shutdownTimeout
-				+ ", ackOnError=" + this.ackOnError
 				+ ", idleEventInterval="
 				+ (this.idleEventInterval == null ? "not enabled" : this.idleEventInterval)
 				+ (this.transactionManager != null

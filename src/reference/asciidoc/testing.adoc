@@ -3,10 +3,16 @@
 
 The `spring-kafka-test` jar contains some useful utilities to assist with testing your applications.
 
+[[ktu]]
+==== KafkaTestUtils
+
+`o.s.kafka.test.utils.KafkaTestUtils` provides a number of static helper methods to consume records, retrieve various record offsets, and others.
+Refer to its https://docs.spring.io/spring-kafka/docs/current/api/org/springframework/kafka/test/utils/KafkaTestUtils.html[Javadocs] for complete details.
+
 [[junit]]
 ==== JUnit
 
-`o.s.kafka.test.utils.KafkaTestUtils` provides some static methods to set up producer and consumer properties.
+`o.s.kafka.test.utils.KafkaTestUtils` also provides some static methods to set up producer and consumer properties.
 The following listing shows those method signatures:
 
 ====
@@ -142,6 +148,9 @@ public class MyTests {
 ----
 ====
 
+By default, `addTopics` will throw an exception when problems arise (such as adding a topic that already exists).
+Version 2.6 added a new version of that method that returns a `Map<String, Exception>`; the key is the topic name and the value is `null` for success, or an `Exception` for a failure.
+
 ==== Using the Same Brokers for Multiple Test Classes
 
 There is no built-in support for doing so, but you can use the same broker for multiple test classes with something similar to the following:
@@ -257,7 +266,7 @@ The following example sets the `topics`, `brokerProperties`, and `brokerProperti
 @EmbeddedKafka(topics = { "any-topic", "${kafka.topics.another-topic}" },
         brokerProperties = { "log.dir=${kafka.broker.logs-dir}",
                             "listeners=PLAINTEXT://localhost:${kafka.broker.port}",
-                            "auto.create.topics.enable=${kafka.broker.topics-enable:true}" }
+                            "auto.create.topics.enable=${kafka.broker.topics-enable:true}" },
         brokerPropertiesLocation = "classpath:/broker.properties")
 ----
 ====

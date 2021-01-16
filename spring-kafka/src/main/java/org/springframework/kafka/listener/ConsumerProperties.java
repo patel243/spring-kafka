@@ -44,6 +44,8 @@ public class ConsumerProperties {
 	 */
 	public static final long DEFAULT_POLL_TIMEOUT = 5_000L;
 
+	private static final int DEFAULT_COMMIT_RETRIES = 3;
+
 	/**
 	 * Topic names.
 	 */
@@ -95,9 +97,15 @@ public class ConsumerProperties {
 
 	private LogIfLevelEnabled.Level commitLogLevel = LogIfLevelEnabled.Level.DEBUG;
 
+	private boolean onlyLogRecordMetadata = true;
+
 	private Properties kafkaConsumerProperties = new Properties();
 
 	private Duration authorizationExceptionRetryInterval;
+
+	private int commitRetries = DEFAULT_COMMIT_RETRIES;
+
+	private boolean fixTxOffsets;
 
 	/**
 	 * Create properties for a container that will subscribe to the specified topics.
@@ -155,17 +163,6 @@ public class ConsumerProperties {
 	@Nullable
 	public Pattern getTopicPattern() {
 		return this.topicPattern;
-	}
-
-	/**
-	 * Return the configured {@link TopicPartitionOffset}s.
-	 * @deprecated in favor of {@link #getTopicPartitions()}.
-	 * @return the topics/partitions.
-	 */
-	@Deprecated
-	@Nullable
-	public TopicPartitionOffset[] getTopicPartitionsToAssign() {
-		return getTopicPartitions();
 	}
 
 	/**
@@ -302,7 +299,8 @@ public class ConsumerProperties {
 	/**
 	 * Get the consumer properties that will be merged with the consumer properties
 	 * provided by the consumer factory; properties here will supersede any with the same
-	 * name(s) in the consumer factory.
+	 * name(s) in the consumer factory. You can add non-String-valued properties, but the
+	 * property name (hashtable key) must be String; all others will be ignored.
 	 * {@code group.id} and {@code client.id} are ignored.
 	 * @return the properties.
 	 * @see org.apache.kafka.clients.consumer.ConsumerConfig
@@ -318,8 +316,7 @@ public class ConsumerProperties {
 	 * provided by the consumer factory; properties here will supersede any with the same
 	 * name(s) in the consumer factory.
 	 * {@code group.id} and {@code client.id} are ignored.
-	 * Property values must be {@link String}s; only properties returned by
-	 * {@link Properties#stringPropertyNames()} will be applied.
+	 * Property keys must be {@link String}s.
 	 * @param kafkaConsumerProperties the properties.
 	 * @see org.apache.kafka.clients.consumer.ConsumerConfig
 	 * @see #setGroupId(String)
@@ -346,6 +343,71 @@ public class ConsumerProperties {
 	 */
 	public void setAuthorizationExceptionRetryInterval(Duration authorizationExceptionRetryInterval) {
 		this.authorizationExceptionRetryInterval = authorizationExceptionRetryInterval;
+	}
+
+	/**
+	 * The number of retries allowed when a
+	 * {@link org.apache.kafka.clients.consumer.RetriableCommitFailedException} is thrown
+	 * by the consumer.
+	 * @return the number of retries.
+	 * @since 2.3.9
+	 */
+	public int getCommitRetries() {
+		return this.commitRetries;
+	}
+
+	/**
+	 * Set number of retries allowed when a
+	 * {@link org.apache.kafka.clients.consumer.RetriableCommitFailedException} is thrown
+	 * by the consumer. Default 3 (4 attempts total).
+	 * @param commitRetries the commitRetries.
+	 * @since 2.3.9
+	 */
+	public void setCommitRetries(int commitRetries) {
+		this.commitRetries = commitRetries;
+	}
+
+	public boolean isOnlyLogRecordMetadata() {
+		return this.onlyLogRecordMetadata;
+	}
+
+	/**
+	 * Set to false to log {@code record.toString()} in log messages instead
+	 * of {@code topic-partition@offset}.
+	 * @param onlyLogRecordMetadata false to log the entire record.
+	 * @since 2.2.14
+	 */
+	public void setOnlyLogRecordMetadata(boolean onlyLogRecordMetadata) {
+		this.onlyLogRecordMetadata = onlyLogRecordMetadata;
+	}
+
+	/**
+	 * Whether or not to correct terminal transactional offsets.
+	 * @return true to fix.
+	 * @since 2.5.6
+	 * @see #setFixTxOffsets(boolean)
+	 */
+	public boolean isFixTxOffsets() {
+		return this.fixTxOffsets;
+	}
+
+	/**
+	 * When consuming records produced by a transactional producer, and the consumer is
+	 * positioned at the end of a partition, the lag can incorrectly be reported as
+	 * greater than zero, due to the pseudo record used to indicate transaction
+	 * commit/rollback and, possibly, the presence of rolled-back records. This does not
+	 * functionally affect the consumer but some users have expressed concern that the
+	 * "lag" is non-zero. Set this to true and the container will correct such
+	 * mis-reported offsets. The check is performed before the next poll to avoid adding
+	 * significant complexity to the commit processing. IMPORTANT: At the time of writing,
+	 * the lag will only be corrected if the consumer is configured with
+	 * {@code isolation.level=read_committed} and {@code max.poll.records} is greater than
+	 * 1. See https://issues.apache.org/jira/browse/KAFKA-10683 for more information.
+	 * @param fixTxOffsets true to correct the offset(s).
+	 * @since 2.5.6
+	 */
+	public void setFixTxOffsets(boolean fixTxOffsets) {
+		this.fixTxOffsets = fixTxOffsets;
 	}
 
 	@Override

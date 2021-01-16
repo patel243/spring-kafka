@@ -17,6 +17,9 @@
 package org.springframework.kafka.config;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Properties;
 
 import org.apache.commons.logging.LogFactory;
@@ -27,6 +30,7 @@ import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.processor.StateRestoreListener;
 import org.apache.kafka.streams.processor.internals.DefaultKafkaClientSupplier;
 
+import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.config.AbstractFactoryBean;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.core.log.LogAccessor;
@@ -52,7 +56,8 @@ import org.springframework.util.Assert;
  *
  * @since 1.1.4
  */
-public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilder> implements SmartLifecycle {
+public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilder>
+		implements SmartLifecycle, BeanNameAware {
 
 	/**
 	 * The default {@link Duration} of {@code 10 seconds} for close timeout.
@@ -70,7 +75,9 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 
 	private Properties properties;
 
-	private final CleanupConfig cleanupConfig;
+	private CleanupConfig cleanupConfig;
+
+	private final List<Listener> listeners = new ArrayList<>();
 
 	private KafkaStreamsInfrastructureCustomizer infrastructureCustomizer = new KafkaStreamsInfrastructureCustomizer() {
 	};
@@ -94,6 +101,8 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 	private volatile boolean running;
 
 	private Topology topology;
+
+	private String beanName;
 
 	/**
 	 * Default constructor that creates the factory without configuration
@@ -127,6 +136,11 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 	 */
 	public StreamsBuilderFactoryBean(KafkaStreamsConfiguration streamsConfig) {
 		this(streamsConfig, new CleanupConfig());
+	}
+
+	@Override
+	public synchronized void setBeanName(String name) {
+		this.beanName = name;
 	}
 
 	/**
@@ -183,8 +197,8 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 	}
 
 	/**
-	 * Specify the timeout in seconds for the {@link KafkaStreams#close(Duration)} operation.
-	 * Defaults to {@link #DEFAULT_CLOSE_TIMEOUT} seconds.
+	 * Specify the timeout in seconds for the {@link KafkaStreams#close(Duration)}
+	 * operation. Defaults to {@link #DEFAULT_CLOSE_TIMEOUT} seconds.
 	 * @param closeTimeout the timeout for close in seconds.
 	 * @see KafkaStreams#close(Duration)
 	 */
@@ -193,7 +207,8 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 	}
 
 	/**
-	 * Providing access to the associated {@link Topology} of this {@link StreamsBuilderFactoryBean}.
+	 * Providing access to the associated {@link Topology} of this
+	 * {@link StreamsBuilderFactoryBean}.
 	 * @return {@link Topology} object
 	 * @since 2.4.4
 	 */
@@ -219,14 +234,49 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 		return this.phase;
 	}
 
+	public void setCleanupConfig(CleanupConfig cleanupConfig) {
+		Assert.notNull(cleanupConfig, CLEANUP_CONFIG_MUST_NOT_BE_NULL);
+		this.cleanupConfig = cleanupConfig; // NOSONAR (sync)
+	}
+
 	/**
 	 * Get a managed by this {@link StreamsBuilderFactoryBean} {@link KafkaStreams} instance.
 	 * @return KafkaStreams managed instance;
 	 * may be null if this {@link StreamsBuilderFactoryBean} hasn't been started.
 	 * @since 1.1.4
 	 */
-	public KafkaStreams getKafkaStreams() {
+	public synchronized KafkaStreams getKafkaStreams() {
 		return this.kafkaStreams;
+	}
+
+	/**
+	 * Get the current list of listeners.
+	 * @return the listeners.
+	 * @since 2.5.3
+	 */
+	public List<Listener> getListeners() {
+		return Collections.unmodifiableList(this.listeners);
+	}
+
+	/**
+	 * Add a {@link Listener} which will be called after starting and stopping the
+	 * streams.
+	 * @param listener the listener.
+	 * @since 2.5.3
+	 */
+	public void addListener(Listener listener) {
+		Assert.notNull(listener, "'listener' cannot be null");
+		this.listeners.add(listener);
+	}
+
+	/**
+	 * Remove a listener.
+	 * @param listener the listener.
+	 * @return true if removed.
+	 * @since 2.5.3
+	 */
+	public boolean removeListener(Listener listener) {
+		return this.listeners.remove(listener);
 	}
 
 	@Override
@@ -274,6 +324,9 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 					this.kafkaStreams.cleanUp();
 				}
 				this.kafkaStreams.start();
+				for (Listener listener : this.listeners) {
+					listener.streamsAdded(this.beanName, this.kafkaStreams);
+				}
 				this.running = true;
 			}
 			catch (Exception e) {
@@ -291,6 +344,9 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 					if (this.cleanupConfig.cleanupOnStop()) {
 						this.kafkaStreams.cleanUp();
 					}
+					for (Listener listener : this.listeners) {
+						listener.streamsRemoved(this.beanName, this.kafkaStreams);
+					}
 					this.kafkaStreams = null;
 				}
 			}
@@ -306,6 +362,32 @@ public class StreamsBuilderFactoryBean extends AbstractFactoryBean<StreamsBuilde
 	@Override
 	public synchronized boolean isRunning() {
 		return this.running;
+	}
+
+	/**
+	 * Called whenever a {@link KafkaStreams} is added or removed.
+	 *
+	 * @since 2.5.3
+	 *
+	 */
+	public interface Listener {
+
+		/**
+		 * A new {@link KafkaStreams} was created.
+		 * @param id the streams id (factory bean name).
+		 * @param streams the streams;
+		 */
+		default void streamsAdded(String id, KafkaStreams streams) {
+		}
+
+		/**
+		 * An existing {@link KafkaStreams} was removed.
+		 * @param id the streams id (factory bean name).
+		 * @param streams the streams;
+		 */
+		default void streamsRemoved(String id, KafkaStreams streams) {
+		}
+
 	}
 
 }

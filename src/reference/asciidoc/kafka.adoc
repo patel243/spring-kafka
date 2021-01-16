@@ -19,6 +19,9 @@ To close existing Producers, call `reset()` on the `DefaultKafkaProducerFactory`
 To close existing Consumers, call `stop()` (and then `start()`) on the `KafkaListenerEndpointRegistry` and/or `stop()` and `start()` on any other listener container beans.
 
 For convenience, the framework also provides an `ABSwitchCluster` which supports two sets of bootstrap servers; one of which is active at any time.
+Configure the `ABSwitchCluster` and add it to the producer and consumer factories, and the `KafkaAdmin`, by calling `setBootstrapServersSupplier()`.
+When you want to switch, call `primary()` or `secondary()` and call `reset()` on the producer factory to establish new connection(s); for consumers, `stop()` and `start()` all listener containers.
+When using `@KafkaListener` s, `stop()` and `start()` the `KafkaListenerEndpointRegistry` bean.
 
 See the Javadocs for more information.
 
@@ -113,6 +116,34 @@ public NewTopic topic3() {
 ----
 ====
 
+Starting with version 2.6, you can omit `.partitions()` and/or `replicas()` and the broker defaults will be applied to those properties.
+The broker version must be at least 2.4.0 to support this feature - see https://cwiki.apache.org/confluence/display/KAFKA/KIP-464%3A+Defaults+for+AdminClient%23createTopic[KIP-464].
+
+====
+[source, java]
+----
+@Bean
+public NewTopic topic4() {
+    return TopicBuilder.name("defaultBoth")
+            .build();
+}
+
+@Bean
+public NewTopic topic5() {
+    return TopicBuilder.name("defaultPart")
+            .replicas(1)
+            .build();
+}
+
+@Bean
+public NewTopic topic6() {
+    return TopicBuilder.name("defaultRepl")
+            .partitions(3)
+            .build();
+}
+----
+====
+
 IMPORTANT: When using Spring Boot, a `KafkaAdmin` bean is automatically registered so you only need the `NewTopic` `@Bean` s.
 
 By default, if the broker is not available, a message is logged, but the context continues to load.
@@ -133,7 +164,7 @@ private KafkaAdmin admin;
 
 ...
 
-    AdminClient client = AdminClient.create(admin.getConfig());
+    AdminClient client = AdminClient.create(admin.getConfigurationProperties());
     ...
     client.close();
 ----
@@ -278,7 +309,8 @@ public interface ProducerListener<K, V> {
 
     void onSuccess(ProducerRecord<K, V> producerRecord, RecordMetadata recordMetadata);
 
-    void onError(ProducerRecord<K, V> producerRecord, Exception exception);
+    void onError(ProducerRecord<K, V> producerRecord, RecordMetadata recordMetadata,
+            Exception exception);
 
 }
 ----
@@ -499,12 +531,27 @@ public KafkaTemplate<Integer, CustomValue> kafkaTemplate() {
 ----
 ====
 
+Starting with version 2.5.10, you can now update the producer properties after the factory is created.
+This might be useful, for example, if you have to update SSL key/trust store locations after a credentials change.
+The changes will not affect existing producer instances; call `reset()` to close any existing  producers so that new producers will be created using the new properties.
+NOTE: You cannot change a transactional producer factory to non-transactional, and vice-versa.
+
+Two new methods are now provided:
+
+====
+[source, java]
+----
+void updateConfigs(Map<String, Object> updates);
+
+void removeConfig(String configKey);
+----
+====
+
 [[replying-template]]
 ===== Using `ReplyingKafkaTemplate`
 
 Version 2.1.3 introduced a subclass of `KafkaTemplate` to provide request/reply semantics.
-The class is named `ReplyingKafkaTemplate` and has one method (in addition to those in the superclass).
-The following listing shows the method signatures:
+The class is named `ReplyingKafkaTemplate` and has two additional methods; the following shows the method signatures:
 
 ====
 [source, java]
@@ -549,7 +596,7 @@ public class KRequestingApplication {
     @Bean
     public ReplyingKafkaTemplate<String, String, String> replyingTemplate(
             ProducerFactory<String, String> pf,
-            ConcurrentMessageListenerContainer<Long, String> repliesContainer) {
+            ConcurrentMessageListenerContainer<String, String> repliesContainer) {
 
         return new ReplyingKafkaTemplate<>(pf, repliesContainer);
     }
@@ -586,6 +633,9 @@ public class KRequestingApplication {
 ====
 
 Note that we can use Boot's auto-configured container factory to create the reply container.
+
+If a non-trivial deserializer is being used for replies, consider using an <<error-handling-deserializer,`ErrorHandlingDeserializer`>> that delegates to your configured deserializer.
+When so configured, the `RequestReplyFuture` will be completed exceptionally and you can catch the `ExecutionException`, with the `DeserializationException` in its `cause` property.
 
 The template sets a header (named `KafkaHeaders.CORRELATION_ID` by default), which must be echoed back by the server side.
 
@@ -651,10 +701,29 @@ In this case, all instances receive each reply, but only the instance that sent 
 This may be useful for auto-scaling, but with the overhead of additional network traffic and the small cost of discarding each unwanted reply.
 When you use this setting, we recommend that you set the template's `sharedReplyTopic` to `true`, which reduces the logging level of unexpected replies to DEBUG instead of the default ERROR.
 
+The following is an example of configuring the reply container to use the same shared reply topic:
+
+====
+[source, java]
+----
+@Bean
+public ConcurrentMessageListenerContainer<String, String> replyContainer(
+        ConcurrentKafkaListenerContainerFactory<String, String> containerFactory) {
+
+    ConcurrentMessageListenerContainer<String, String> container = containerFactory.createContainer("topic2");
+    container.getContainerProperties().setGroupId(UUID.randomUUID().toString()); // unique
+    Properties props = new Properties();
+    props.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest"); // so the new group doesn't get old replies
+    container.getContainerProperties().setKafkaConsumerProperties(props);
+    return container;
+}
+----
+====
+
 IMPORTANT: If you have multiple client instances and you do not configure them as discussed in the preceding paragraph, each instance needs a dedicated reply topic.
 An alternative is to set the `KafkaHeaders.REPLY_PARTITION` and use a dedicated partition for each instance.
 The `Header` contains a four-byte int (big-endian).
-The server must use this header to route the reply to the correct topic (`@KafkaListener` does this).
+The server must use this header to route the reply to the correct partition (`@KafkaListener` does this).
 In this case, though, the reply container must not use Kafka's group management feature and must be configured to listen on a fixed partition (by using a `TopicPartitionOffset` in its `ContainerProperties` constructor).
 
 NOTE: The `DefaultKafkaHeaderMapper` requires Jackson to be on the classpath (for the `@KafkaListener`).
@@ -768,6 +837,11 @@ The real `ConsumerRecord` s in the `Collection` contain the actual topic(s) from
 IMPORTANT: The listener container for the replies MUST be configured with `AckMode.MANUAL` or `AckMode.MANUAL_IMMEDIATE`; the consumer property `enable.auto.commit` must be `false` (the default since version 2.3).
 To avoid any possibility of losing messages, the template only commits offsets when there are zero requests outstanding, i.e. when the last outstanding request is released by the release strategy.
 After a rebalance, it is possible for duplicate reply deliveries; these will be ignored for any in-flight requests; you may see error log messages when duplicate replies are received for already released replies.
+
+NOTE: If you use an <<error-handling-deserializer,`ErrorHandlingDeserializer`>> with this aggregating template, the framework will not automatically detect `DeserializationException` s.
+Instead, the record (with a `null` value) will be returned intact, with the deserialization exception(s) in headers.
+It is recommended that applications call the utility method `ReplyingKafkaTemplate.checkDeserialization()` method to determine if a deserialization exception occurred.
+See its javadocs for more information.
 
 [[receiving-messages]]
 ==== Receiving Messages
@@ -888,23 +962,18 @@ This, together with an increased `session.timeout.ms`, can be used to reduce reb
 [[kafka-container]]
 ====== Using `KafkaMessageListenerContainer`
 
-The following constructors are available:
+The following constructor is available:
 
 ====
 [source, java]
 ----
 public KafkaMessageListenerContainer(ConsumerFactory<K, V> consumerFactory,
                     ContainerProperties containerProperties)
-
-public KafkaMessageListenerContainer(ConsumerFactory<K, V> consumerFactory,
-                    ContainerProperties containerProperties,
-                    TopicPartitionOffset... topicPartitions)
 ----
 ====
 
-Each takes a `ConsumerFactory` and information about topics and partitions, as well as other configuration in a `ContainerProperties`
+It receives a `ConsumerFactory` and information about topics and partitions, as well as other configuration, in a `ContainerProperties`
 object.
-The second constructor is used by the `ConcurrentMessageListenerContainer` (<<using-ConcurrentMessageListenerContainer,described later>>) to distribute `TopicPartitionOffset` across the consumer instances.
 `ContainerProperties` has the following constructors:
 
 ====
@@ -986,7 +1055,7 @@ NOTE: By default, no interval is configured - authorization errors are considere
 [[using-ConcurrentMessageListenerContainer]]
 ====== Using `ConcurrentMessageListenerContainer`
 
-The single constructor is similar to the first `KafkaListenerContainer` constructor.
+The single constructor is similar to the `KafkaListenerContainer` constructor.
 The following listing shows the constructor's signature:
 
 ====
@@ -994,7 +1063,6 @@ The following listing shows the constructor's signature:
 ----
 public ConcurrentMessageListenerContainer(ConsumerFactory<K, V> consumerFactory,
                             ContainerProperties containerProperties)
-
 ----
 ====
 
@@ -1023,10 +1091,10 @@ org.apache.kafka.clients.consumer.RoundRobinAssignor
 =====
 ====
 
-For the second constructor, the `ConcurrentMessageListenerContainer` distributes the `TopicPartition` instances across the delegate `KafkaMessageListenerContainer` instances.
+When the container properties are configured with `TopicPartitionOffset` s, the `ConcurrentMessageListenerContainer` distributes the `TopicPartitionOffset` instances across the delegate `KafkaMessageListenerContainer` instances.
 
-If, say, six `TopicPartition` instances are provided and the `concurrency` is `3`; each container gets two partitions.
-For five `TopicPartition` instances, two containers get two partitions, and the third gets one.
+If, say, six `TopicPartitionOffset` instances are provided and the `concurrency` is `3`; each container gets two partitions.
+For five `TopicPartitionOffset` instances, two containers get two partitions, and the third gets one.
 If the `concurrency` is greater than the number of `TopicPartitions`, the `concurrency` is adjusted down such that each container gets one partition.
 
 NOTE: The `client.id` property (if set) is appended with `-n` where `n` is the consumer instance that corresponds to the concurrency.
@@ -1092,6 +1160,8 @@ This method gives the listener control over when offsets are committed.
 Starting with version 2.3, the `Acknowledgment` interface has two additional methods `nack(long sleep)` and `nack(int index, long sleep)`.
 The first one is used with a record listener, the second with a batch listener.
 Calling the wrong method for your listener type will throw an `IllegalStateException`.
+
+NOTE: If you want to commit a partial batch, using `nack()`, When using transactions, set the `AckMode` to `MANUAL`; invoking `nack()` will send the offsets of the successfully processed records to the transaction.
 
 IMPORTANT: `nack()` can only be called on the consumer thread that invokes your listener.
 
@@ -1205,6 +1275,9 @@ public void listen(String data) {
 ----
 ====
 
+[[manual-assignment]]
+====== Explicit Partition Assignment
+
 You can also configure POJO listeners with explicit topics and partitions (and, optionally, their initial offsets).
 The following example shows how to do so:
 
@@ -1225,6 +1298,62 @@ public void listen(ConsumerRecord<?, ?> record) {
 You can specify each partition in the `partitions` or `partitionOffsets` attribute but not both.
 
 As with most annotation properties, you can use SpEL expressions; for an example of how to generate a large list of partitions, see <<tip-assign-all-parts>>.
+
+Starting with version 2.5.5, you can apply an initial offset to all assigned partitions:
+
+====
+[source, java]
+----
+@KafkaListener(id = "thing3", topicPartitions =
+        { @TopicPartition(topic = "topic1", partitions = { "0", "1" },
+             partitionOffsets = @PartitionOffset(partition = "*", initialOffset = "0"))
+        })
+public void listen(ConsumerRecord<?, ?> record) {
+    ...
+}
+----
+====
+
+The `*` wildcard represents all partitions in the `partitions` attribute.
+There must only be one `@PartitionOffset` with the wildcard in each `@TopicPartition`.
+
+In addition, when the listener implements `ConsumerSeekAware`, `onPartitionsAssigned` is now called, even when using manual assignment.
+This allows, for example, any arbitrary seek operations at that time.
+
+Starting with version 2.6.4, you can specify a comma-delimited list of partitions, or partition ranges:
+
+====
+[source, java]
+----
+@KafkaListener(id = "pp", autoStartup = "false",
+        topicPartitions = @TopicPartition(topic = "topic1",
+                partitions = "0-5, 7, 10-15"))
+public void process(String in) {
+    ...
+}
+----
+====
+
+The range is inclusive; the example above will assign partitions `0, 1, 2, 3, 4, 5, 7, 10, 11, 12, 13, 14, 15`.
+
+The same technique can be used when specifying initial offsets:
+
+====
+[source, java]
+----
+@KafkaListener(id = "thing3", topicPartitions =
+        { @TopicPartition(topic = "topic1",
+             partitionOffsets = @PartitionOffset(partition = "0-5", initialOffset = "0"))
+        })
+public void listen(ConsumerRecord<?, ?> record) {
+    ...
+}
+----
+====
+
+The initial offset will be applied to all 6 partitions.
+
+====== Manual Acknowledgment
 
 When using manual `AckMode`, you can also provide the listener with the `Acknowledgment`.
 The following example also shows how to use a different container factory.
@@ -1640,7 +1769,18 @@ public void listenDefault(Object object, @Header(KafkaHeaders.RECEIVED_TOPIC) St
 
 This won't work if the object is a `String`; the `topic` parameter will also get a reference to `object`.
 
-If you need metadata about the record in a default method, use this
+If you need metadata about the record in a default method, use this:
+
+====
+[source, java]
+----
+@KafkaHandler(isDefault = true)
+void listen(Object in, @Header(KafkaHeaders.RECORD_METADATA) ConsumerRecordMetadata meta) {
+    String topic = meta.topic();
+    ...
+}
+----
+====
 
 [[kafkalistener-lifecycle]]
 ===== `@KafkaListener` Lifecycle Management
@@ -1704,6 +1844,7 @@ public class Config implements KafkaListenerConfigurer {
     public void configureKafkaListeners(KafkaListenerEndpointRegistrar registrar) {
       registrar.setValidator(new MyValidator());
     }
+
 }
 ----
 ====
@@ -1766,6 +1907,9 @@ public KafkaListenerErrorHandler validationErrorHandler() {
 }
 ----
 ====
+
+Starting with version 2.5.11, validation now works on payloads for `@KafkaHandler` methods in a class-level listener.
+See <<class-level-kafkalistener>>.
 
 [[rebalance-listeners]]
 ===== Rebalancing Listeners
@@ -2124,7 +2268,24 @@ public SeekToCurrentErrorHandler eh() {
 
 However, see the note at the beginning of this section; you can avoid using the `RetryTemplate` altogether.
 
-IMPORTANT: If the recoverer fails (throws an exception), the record will be included in the seeks and recovery will be attempted again during the next delivery.
+IMPORTANT: If the recoverer fails (throws an exception), the failed record will be included in the seeks.
+Starting with version 2.5.5, if the recoverer fails, the `BackOff` will be reset by default and redeliveries will again go through the back offs before recovery is attempted again.
+With earlier versions, the `BackOff` was not reset and recovery was re-attempted on the next failure.
+To revert to the previous behavior, set the error handler's `resetStateOnRecoveryFailure` to `false`.
+
+Starting with version 2.6, you can now provide the error handler with a `BiFunction<ConsumerRecord<?, ?>, Exception, BackOff>` to determine the `BackOff` to use, based on the failed record and/or the exception:
+
+====
+[source, java]
+----
+handler.setBackOffFunction((record, ex) -> { ... });
+----
+====
+
+If the function returns `null`, the handler's default `BackOff` will be used.
+
+Starting with version 2.6.3, set `resetStateOnExceptionChange` to `true` and the retry sequence will be restarted (including the selection of a new `BackOff`, if so configured) if the exception type changes between failures.
+By default, the exception type is not considered.
 
 [[container-props]]
 ==== Listener Container Properties
@@ -2139,6 +2300,10 @@ IMPORTANT: If the recoverer fails (throws an exception), the record will be incl
 |ackCount
 |1
 |The number of records before committing pending offsets when the `ackMode` is `COUNT` or `COUNT_TIME`.
+
+|adviceChain
+|`null`
+|A chain of `Advice` objects (e.g. `MethodInterceptor` around advice) wrapping the message listener, invoked in order.
 
 |ackMode
 |BATCH
@@ -2195,8 +2360,17 @@ The default executor creates threads named `<name>-C-n`; with the `KafkaMessageL
 |See <<delivery-header>>.
 
 |eosMode
-|`ALPHA`
+|`BETA`
 |Exactly Once Semantics mode; see <<exactly-once>>.
+
+|fixTxOffsets
+|`false`
+|When consuming records produced by a transactional producer, and the consumer is positioned at the end of a partition, the lag can incorrectly be reported as greater than zero, due to the pseudo record used to indicate transaction commit/rollback and, possibly, the presence of rolled-back records.
+This does not functionally affect the consumer but some users have expressed concern that the "lag" is non-zero.
+Set this property to `true` and the container will correct such mis-reported offsets.
+The check is performed before the next poll to avoid adding significant complexity to the commit processing.
+At the time of writing, the lag will only be corrected if the consumer is configured with `isolation.level=read_committed` and `max.poll.records` is greater than 1.
+See https://issues.apache.org/jira/browse/KAFKA-10683[KAFKA-10683] for more information.
 
 |groupId
 |`null`
@@ -2241,6 +2415,11 @@ See `noPollThreshold` and `pollTimeout`.
 |Multiplied by `pollTimeOut` to determine whether to publish a `NonResponsiveConsumerEvent`.
 See `monitorInterval`.
 
+|onlyLogRecord
+Metadata
+|`false`
+|Set to false to log the complete consumer record (in error, debug logs etc) instead of just `topic-partition@offset`.
+
 |pollTimeout
 |5000
 |The timeout passed into `Consumer.poll()`.
@@ -2252,6 +2431,15 @@ See `monitorInterval`.
 |shutdownTimeout
 |10000
 |The maximum time in ms to block the `stop()` method until all consumers stop and before publishing the container stopped event.
+
+|stopContainerWhenFenced
+|`false`
+|Stop the listener container if a `ProducerFencedException` is thrown.
+See <<after-rollback>> for more information.
+
+|stopImmediate
+|`false`
+|When the container is stopped, stop processing after the current record instead of after processing all the records from the previous poll.
 
 |subBatchPerPartition
 |See desc.
@@ -2273,6 +2461,11 @@ topicPartitions
 |n/a
 |The configured topics, topic pattern or explicitly assigned topics/partitions.
 Mutually exclusive; at least one must be provided; enforced by `ContainerProperties` constructors.
+
+|transaction
+Definition
+|`null`
+|Set transaction properties; see <<chained-transaction-manager>> for more information.
 
 |transactionManager
 |`null`
@@ -2423,13 +2616,14 @@ The following Spring application events are published by listener containers and
 This event might signal that the configured task executor has insufficient threads to support the containers it is used in and their concurrency.
 An error message is also logged when this condition occurs.
 * `ListenerContainerIdleEvent`: published when no messages have been received in `idleInterval` (if configured).
+* `ListenerContainerNoLongerIdleEvent`: published when a record is consumed after previously publishing a `ListenerContainerIdleEvent`.
 * `NonResponsiveConsumerEvent`: published when the consumer appears to be blocked in the `poll` method.
 * `ConsumerPausedEvent`: published by each consumer when the container is paused.
 * `ConsumerResumedEvent`: published by each consumer when the container is resumed.
 * `ConsumerStoppingEvent`: published by each consumer just before stopping.
 * `ConsumerStoppedEvent`: published after the consumer is closed.
 See <<thread-safety>>.
-* `ContainerStoppedEvent`: published when all consumers have terminated.
+* `ContainerStoppedEvent`: published when all consumers have stopped.
 
 IMPORTANT: By default, the application context's event multicaster invokes event listeners on the calling thread.
 If you change the multicaster to use an async executor, you must not invoke any `Consumer` methods when the event contains a reference to the consumer.
@@ -2445,6 +2639,8 @@ The `ListenerContainerIdleEvent` has the following properties:
 For example, if the consumer's `pause()` method was previously called, it can `resume()` when the event is received.
 * `paused`: Whether the container is currently paused.
 See <<pause-resume>> for more information.
+
+The `ListenerContainerNoLongerIdleEvent` has the same properties, except `idleTime` and `paused`.
 
 The `NonResponsiveConsumerEvent` has the following properties:
 
@@ -2471,6 +2667,26 @@ The `ConsumerStartingEvent`, `ConsumerStartingEvent`, `ConsumerFailedToStartEven
 
 All containers (whether a child or a parent) publish `ContainerStoppedEvent`.
 For a parent container, the source and container properties are identical.
+
+In addition, the `ConsumerStoppedEvent` has the following additional property:
+
+* `reason`
+** `NORMAL` - the consumer stopped normally (container was stopped).
+** `ERROR` - a `java.lang.Error` was thrown.
+** `FENCED` - the transactional producer was fenced and the `stopContainerWhenFenced` container property is `true`.
+** `AUTH` - an `AuthorizationException` was thrown and the `authorizationExceptionRetryInterval` is not configured.
+** `NO_OFFSET` - there is no offset for a partition and the `auto.offset.reset` policy is `none`.
+
+You can use this event to restart the container after such a condition:
+
+====
+[source, java]
+----
+if (event.getReason.equals(Reason.FENCED)) {
+    event.getSource(MessageListenerContainer.class).start();
+}
+----
+====
 
 [[idle-containers]]
 ===== Detecting Idle and Non-Responsive Consumers
@@ -2523,7 +2739,9 @@ To solve this issue, the container publishes a `NonResponsiveConsumerEvent` if a
 By default, this check is performed once every 30 seconds in each container.
 You can modify this behavior by setting the `monitorInterval` (default 30 seconds) and `noPollThreshold` (default 3.0) properties in the `ContainerProperties` when configuring the listener container.
 The `noPollThreshold` should be greater than `1.0` to avoid getting spurious events due to a race condition.
-Receiving such an event lets you stop the containers, thus waking the consumer so that it can terminate.
+Receiving such an event lets you stop the containers, thus waking the consumer so that it can stop.
+
+Starting with version 2.6.2, if a container has published a `ListenerContainerIdleEvent`, it will publish a `ListenerContainerNoLongerIdleEvent` when a record is subsequently received.
 
 ====== Event Consumption
 
@@ -2615,8 +2833,7 @@ When using group management, `onPartitionsAssigned` is called when partitions ar
 You can use this method, for example, for setting initial offsets for the partitions, by calling the callback.
 You can also use this method to associate this thread's callback with the assigned partitions (see the example below).
 You must use the callback argument, not the one passed into `registerSeekCallback`.
-This method is never called if you explicitly assign partitions yourself.
-Use the `TopicPartitionOffset` in that case.
+Starting with version 2.5.5, this method is called, even when using <<manual-assignment,manual partition assignment>>.
 
 `onPartitionsRevoked` is called when the container is stopped or Kafka revokes assignments.
 You should discard this thread's callback and remove any associations to the revoked partitions.
@@ -2664,7 +2881,7 @@ NOTE: The `seekToBeginning` method that accepts a collection is useful, for exam
 ====
 [source, java]
 ----
-public class MyListener extends AbstractConsumerSeekAware {
+public class MyListener implements ConsumerSeekAware {
 
 ...
 
@@ -2793,6 +3010,41 @@ public class SeekToLastOnIdleListener extends AbstractConsumerSeekAware {
 }
 ----
 ====
+
+Version 2.6 added convenience methods to the abstract class:
+
+* `seekToBeginning()` - seeks all assigned partitions to the beginning
+* `seekToEnd()` - seeks all assigned partitions to the end
+* `seekToTimestamp(long time)` - seeks all assigned partitions to the offset represented by that timestamp.
+
+Example:
+
+====
+[source, java]
+----
+public class MyListener extends AbstractConsumerSeekAware {
+
+    @KafkaListener(...)
+    void listn(...) {
+        ...
+    }
+}
+
+public class SomeOtherBean {
+
+    MyListener listener;
+
+    ...
+
+    void someMethod() {
+        this.listener.seekToTimestamp(System.currentTimeMillis - 60_000);
+    }
+
+}
+
+----
+====
+
 
 [[container-factory]]
 ==== Container factory
@@ -2935,13 +3187,15 @@ The consumer/producer `id` passed to the listener is added to the meter's tags w
 .An example of obtaining one of the Kafka metrics
 [source, java]
 ----
-double count =this.meterRegistry.get("kafka.producer.node.incoming.byte.total")
+double count = this.meterRegistry.get("kafka.producer.node.incoming.byte.total")
                 .tag("customTag", "customTagValue")
                 .tag("spring.id", "myProducerFactory.myClientId-1")
                 .functionCounter()
                 .count()
 ----
 ====
+
+A similar listener is provided for the `StreamsBuilderFactoryBean` - see <<streams-micrometer>>.
 
 [[transactions]]
 ==== Transactions
@@ -2956,6 +3210,8 @@ Spring for Apache Kafka adds support in the following ways:
 * `KafkaTransactionManager`: Used with normal Spring transaction support (`@Transactional`, `TransactionTemplate` etc).
 * Transactional `KafkaMessageListenerContainer`
 * Local transactions with `KafkaTemplate`
+* Transaction synchronization with other transaction managers
+* `ChainedKafkaTransactionManager`
 
 Transactions are enabled by providing the `DefaultKafkaProducerFactory` with a `transactionIdPrefix`.
 In that case, instead of managing a single shared `Producer`, the factory maintains a cache of transactional producers.
@@ -2970,8 +3226,16 @@ NOTE: While transactions are supported with batch listeners, by default, zombie 
 However, starting with version 2.3.2, zombie fencing is supported if you set the container property `subBatchPerPartition` to true.
 In that case, the batch listener is invoked once per partition received from the last poll, as if each poll only returned records for a single partition.
 This is `true` by default since version 2.5 when transactions are enabled with `EOSMode.ALPHA`; set it to `false` if you are using transactions but are not concerned about zombie fencing.
+Also see <<exactly-once>>.
 
 Also see <<transaction-id-prefix>>.
+
+With Spring Boot, it is only necessary to set the `spring.kafka.producer.transaction-id-prefix` property - Boot will automatically configure a `KafkaTransactionManager` bean and wire it into the listener container.
+
+IMPORTANT: Starting with version 2.5.8, you can now configure the `maxAge` property on the producer factory.
+This is useful when using transactional producers that might lay idle for the broker's `transactional.id.expiration.ms`.
+With current `kafka-clients`, this can cause a `ProducerFencedException` without a rebalance.
+By setting the `maxAge` to less than `transactional.id.expiration.ms`, the factory will refresh the producer if it is past it's max age.
 
 ===== Using `KafkaTransactionManager`
 
@@ -2987,52 +3251,24 @@ You must configure the `KafkaTemplate` to use the same `ProducerFactory` as the 
 
 ===== Transaction Synchronization
 
-If you need to synchronize a Kafka transaction with some other transaction, configure the listener container with the appropriate transaction manager (one that supports synchronization, such as the `DataSourceTransactionManager`).
-Any operations performed on a transactional `KafkaTemplate` from the listener participate in a single transaction.
-The Kafka transaction is committed (or rolled back) immediately after the controlling transaction.
-Before exiting the listener, you should invoke one of the template's `sendOffsetsToTransaction` methods (unless you use a <<chained-transaction-manager,`ChainedKafkaTransactionManager`>>).
-For convenience, the listener container binds its consumer group ID to the thread, so, generally, you can use the first method.
-The following listing shows the two method signatures:
+This section refers to producer-only transactions (transactions not started by a listener container); see <<chained-transaction-manager>> for information about synchronizing transactions when the container starts the transaction.
+
+If you want to send records to kafka and perform some database updates, you can use normal Spring transaction management with, say, a `DataSourceTransactionManager`.
 
 ====
 [source, java]
 ----
-void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets);
-
-void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets, String consumerGroupId);
-----
-====
-
-The following example shows how to use the first signature of the `sendOffsetsToTransaction` method:
-
-====
-[source, java]
-----
-@Bean
-KafkaMessageListenerContainer container(ConsumerFactory<String, String> cf,
-            final KafkaTemplate template) {
-    ContainerProperties props = new ContainerProperties("foo");
-    props.setGroupId("group");
-    props.setTransactionManager(new SomeOtherTransactionManager());
-    ...
-    props.setMessageListener((MessageListener<String, String>) m -> {
-        template.send("foo", "bar");
-        template.send("baz", "qux");
-        template.sendOffsetsToTransaction(
-            Collections.singletonMap(new TopicPartition(m.topic(), m.partition()),
-                new OffsetAndMetadata(m.offset() + 1)));
-    });
-    return new KafkaMessageListenerContainer<>(cf, props);
+@Transactional
+public void process(List<Thing> things) {
+    things.forEach(thing -> this.kafkaTemplate.send("topic", thing));
+    updateDb(things);
 }
 ----
 ====
 
-NOTE: The offset to be committed is one greater than the offset of the records processed by the listener.
-
-IMPORTANT: You should call this only when you use transaction synchronization.
-When a listener container is configured to use a `KafkaTransactionManager` or `ChainedKafkaTransactionManager`, it takes care of sending the offsets to the transaction.
-
-See <<ex-jdbc-sync>> for an example application that synchronizes JDBC and Kafka transactions.
+The interceptor for the `@Transactional` annotation starts the transaction and the `KafkaTemplate` will synchronize a transaction with that transaction manager; each send will participate in that transaction.
+When the method exits, the database transaction will commit followed by the Kafka transaction.
+If you wish the commits to be performed in the reverse order (Kafka first), use a <<chained-transaction-manager,`ChainedTransactionManager`>> configured with the `DataSourceTransactionManager` as the first TM and then the `KafkaTransactionManager`, in that order.
 
 [[chained-transaction-manager]]
 ===== Using `ChainedKafkaTransactionManager`
@@ -3043,7 +3279,11 @@ Since it is a `KafkaAwareTransactionManager`, the container can send the offsets
 This provides another mechanism for synchronizing transactions without having to send the offsets to the transaction in the listener code.
 You should chain your transaction managers in the desired order and provide the `ChainedTransactionManager` in the `ContainerProperties`.
 
-See <<ex-jdbc-sync>> for an example application that synchronizes JDBC and Kafka transactions.
+See <<ex-jdbc-sync>> for an example application that chains JDBC and Kafka transactions.
+
+Starting with version 2.5.4, you can configure a `TransactionDefinition` in the `ContainerProperties`; its properties will be copied to the container's `TransactionTemplate` used to start transactions.
+This allows, for example, setting a transaction timeout for other transaction managers within the `ChainedKafkaTransactionManager`.
+It does not, however, make sense to set a propagation behavior because the container would always need to start a new transaction; anything other than `REQUIRED` or `REQUIRES_NEW` will be rejected.
 
 ===== `KafkaTemplate` Local Transactions
 
@@ -3072,7 +3312,7 @@ Instead, a new "nested" transaction is used.
 ===== `transactionIdPrefix`
 
 As mentioned in <<transactions, the overview>>, the producer factory is configured with this property to build the producer `transactional.id` property.
-There is rather a dichotomy when specifying this property in that, when running multiple instances of the application, it must be the same on all instances to satisfy fencing zombies (also mentioned in the overview) when producing records on a listener container thread.
+There is a dichotomy when specifying this property in that, when running multiple instances of the application with `EOSMode.ALPHA`, it must be the same on all instances to satisfy fencing zombies (also mentioned in the overview) when producing records on a listener container thread.
 However, when producing records using transactions that are **not** started by a listener container, the prefix has to be different on each instance.
 Version 2.3, makes this simpler to configure, especially in a Spring Boot application.
 In previous versions, you had to create two producer factories and `KafkaTemplate` s - one for producing records on a listener container thread and one for stand-alone transactions started by `kafkaTemplate.executeInTransaction()` or by a transaction interceptor on a `@Transactional` method.
@@ -3080,9 +3320,12 @@ In previous versions, you had to create two producer factories and `KafkaTemplat
 Now, you can override the factory's `transactionalIdPrefix` on the `KafkaTemplate` and the `KafkaTransactionManager`.
 
 When using a transaction manager and template for a listener container, you would normally leave this to default to the producer factory's property.
-This value should be the same for all application instances.
+This value should be the same for all application instances when using `EOSMode.ALPHA`.
+With `EOSMode.BETA` it is no longer necessary to use the same `transactional.id`, even for consumer-initiated transactions; in fact, it must be unique on each instance the same as producer-initiated transactions.
 For transactions started by the template (or the transaction manager for `@Transaction`) you should set the property on the template and transaction manager respectively.
 This property must have a different value on each application instance.
+
+This problem (different rules for `transactional.id`) has been eliminated when `EOSMode.BETA` is being used (with broker versions >= 2.5); see <<exactly-once>>.
 
 [[tx-template-mixed]]
 ===== `KafkaTemplate` Transactional and non-Transactional Publishing
@@ -3104,7 +3347,7 @@ See <<after-rollback>> for more information.
 
 When using a batch listener, version 2.4.2 introduced an alternative mechanism to deal with failures while processing a batch; the `BatchToRecordAdapter`.
 When a container factory with `batchListener` set to true is configured with a `BatchToRecordAdapter`, the listener is invoked with one record at a time.
-This enables error handling within the batch, while still allowing to abort the entire batch, depending on the exception type.
+This enables error handling within the batch, while still making it possible to stop processing the entire batch, depending on the exception type.
 A default `BatchToRecordAdapter` is provided, that can be configured with a standard `ConsumerRecordRecoverer` such as the `DeadLetterPublishingRecoverer`.
 The following test case configuration snippet illustrates how to use this feature:
 
@@ -3166,12 +3409,12 @@ If the listener successfully processes the record (or multiple records, when usi
 If the listener throws an exception, the transaction is rolled back and the consumer is repositioned so that the rolled-back record(s) can be retrieved on the next poll.
 See <<after-rollback>> for more information and for handling records that repeatedly fail.
 
-Using transactions enables exactly once semantics (EOS).
+Using transactions enables Exactly Once Semantics (EOS).
 
 This means that, for a `read->process-write` sequence, it is guaranteed that the **sequence** is completed exactly once.
 (The read and process are have at least once semantics).
 
-Kafka version 2.5 now supports two EOS modes:
+Spring for Apache Kafka version 2.5 and later supports two EOS modes:
 
 * `ALPHA` - aka `transactional.id` fencing (since version 0.11.0.0)
 * `BETA` - aka fetch-offset-request fencing (since version 2.5)
@@ -3181,18 +3424,20 @@ Spring manages this by using a `Producer` for each `group.id/topic/partition`; w
 
 With mode `BETA`, it is not necessary to have a producer for each `group.id/topic/partition` because consumer metadata is sent along with the offsets to the transaction and the broker can determine if the producer is fenced using that information instead.
 
-To configure the container to use mode `BETA`, set the container property `EOSMode` to `BETA`.
+Starting with version 2.6, the default `EOSMode` is `BETA`.
 
-IMPORTANT: With `BETA`, your brokers must be version 2.5 or later, unless you are using `kafka-clients` version 2.6; the producer in that version can automatically fall back to `ALPHA` if the broker does not support `BETA`.
-To enable the fall back in the 2.6 client; set `internal.auto.downgrade.txn.commit=true`.
+To configure the container to use mode `ALPHA`, set the container property `EOSMode` to `ALPHA`, to revert to the previous behavior.
 
-You should also set the `DefaultKafkaConsumerFactory` `producerPerConsumerPartition` property to `false`, to reduce the number of producers needed.
+IMPORTANT: With `BETA`, your brokers must be version 2.5 or later, however with `kafka-clients` version 2.6, the producer will automatically fall back to `ALPHA` if the broker does not support `BETA`.
+The `DefaultKafkaProducerFactory` is configured to enable that behavior.
+If your brokers are earlier than 2.5, be sure to leave the `DefaultKafkaProducerFactory` `producerPerConsumerPartition` set to `true` and, if you are using a batch listener, you should set `subBatchPerPartition` to `true`.
 
-If your brokers are upgraded to 2.5, you can immediately enable `BETA` mode.
-
-If your brokers are older than 2.5, when the 2.6 client is available, you can enable `BETA` mode, but leave the `producerPerConsumerPartition` to its default `true` and enable fall back as discussed above.
 When your brokers are upgraded to 2.5 or later, the producer will automatically switch to using mode `BETA`, but the number of producers will remain as before.
-You can then do a rolling upgrade of your application with `producerPerConsumerPartition` set to `false` to reduce the number of producers.
+You can then do a rolling upgrade of your application with `producerPerConsumerPartition` set to `false` to reduce the number of producers; you should also no longer set the `subBatchPerPartition` container property.
+
+If your brokers are already 2.5 or newer, you should set the `DefaultKafkaProducerFactory` `producerPerConsumerPartition` property to `false`, to reduce the number of producers needed.
+
+IMPORTANT: When using `EOSMode.BETA` with `producerPerConsumerPartition=false` the `transactional.id` must be unique across all application instances.
 
 When using `BETA` mode, it is no longer necessary to set the `subBatchPerPartition` to `true`; it will default to `false` when the `EOSMode` is `BETA`.
 
@@ -3352,7 +3597,7 @@ Received test
 
 Version 2.1.3 added `pause()` and `resume()` methods to listener containers.
 Previously, you could pause a consumer within a `ConsumerAwareMessageListener` and resume it by listening for a `ListenerContainerIdleEvent`, which provides access to the `Consumer` object.
-While you could pause a consumer in an idle container byi using an event listener, in some cases, this was not thread-safe, since there is no guarantee that the event listener is invoked on the consumer thread.
+While you could pause a consumer in an idle container by using an event listener, in some cases, this was not thread-safe, since there is no guarantee that the event listener is invoked on the consumer thread.
 To safely pause and resume consumers, you should use the `pause` and `resume` methods on the listener containers.
 A `pause()` takes effect just before the next `poll()`; a `resume()` takes effect just after the current `poll()` returns.
 When a container is paused, it continues to `poll()` the consumer, avoiding a rebalance if group management is being used, but it does not retrieve any records.
@@ -3461,8 +3706,8 @@ Also, you can pass in `Supplier<Serializer>` or `Supplier<Deserializer>` instanc
 [[string-serde]]
 ===== String serialization
 
-Since version 2.5, Spring Kafka provides `ToStringSerializer` and `ParseStringDeserializer` classes that uses String representation of entities.
-They rely on methods `toString` and some `Function<String>` or `BiFuntion<String, Headers>` to parse the String and populate properties of an instance.
+Since version 2.5, Spring Kafka provides `ToStringSerializer` and `ParseStringDeserializer` classes that use String representation of entities.
+They rely on methods `toString` and some `Function<String>` or `BiFunction<String, Headers>` to parse the String and populate properties of an instance.
 Usually, this would invoke some static method on the class, such as `parse`:
 
 ====
@@ -3640,14 +3885,14 @@ DefaultKafkaConsumerFactory<Integer, Cat1> cf = new DefaultKafkaConsumerFactory<
 
 Starting with version 2.5, you can now configure the deserializer, via properties, to invoke a method to determine the target type.
 If present, this will override any of the other techniques discussed above.
-This can be useful if the data is published by an application that does not use the Spring serializer and you need to deserializer to different types depending on the data, or other headers.
+This can be useful if the data is published by an application that does not use the Spring serializer and you need to deserialize to different types depending on the data, or other headers.
 Set these properties to the method name - a fully qualified class name followed by the method name, separated by a period `.`.
-The method must be declared as `public static`, have one of two signatures `(byte[] data, Headers headers)` or `(byte[] data)` and return a Jackson `JavaType`.
+The method must be declared as `public static`, have one of three signatures `(String topic, byte[] data, Headers headers)`, `(byte[] data, Headers headers)` or `(byte[] data)` and return a Jackson `JavaType`.
 
 * `JsonDeserializer.KEY_TYPE_METHOD` : `spring.json.key.type.method`
 * `JsonDeserializer.VALUE_TYPE_METHOD` : `spring.json.value.type.method`
 
-You can use arbitrary headers or introspecting the data to determine the type.
+You can use arbitrary headers or inspect the data to determine the type.
 
 ====
 .Example
@@ -3669,7 +3914,24 @@ public static JavaType thingOneOrThingTwo(byte[] data, Headers headers) {
 ----
 ====
 
-For more sophisticated data introspection consider using `JsonPath` or similar but, the simpler the test to determine the type, the more efficient the process will be.
+For more sophisticated data inspection consider using `JsonPath` or similar but, the simpler the test to determine the type, the more efficient the process will be.
+
+The following is an example of creating the deserializer programmatically (when providing the consumer factory with the deserializer in the constructor):
+
+====
+[source, java]
+----
+JsonDeserializer<Object> deser = new JsonDeserializer<>()
+        .trustedPackages("*")
+        .typeResolver(SomeClass::thing1Thing2JavaTypeForTopic);
+
+...
+
+public static JavaType thing1Thing2JavaTypeForTopic(String topic, byte[] data, Headers headers) {
+    ...
+}
+----
+====
 
 ====== Programmatic Construction
 
@@ -4200,6 +4462,22 @@ The mapper can handle (decode) headers produced by older versions (it checks for
 IMPORTANT: To be compatible with earlier versions, set `encodeStrings` to `true`, if records produced by a version using 2.3 might be consumed by applications using earlier versions.
 When all applications are using 2.3 or higher, you can leave the property at its default value of `false`.
 
+====
+[source, java]
+----
+@Bean
+MessagingMessageConverter converter() {
+    MessagingMessageConverter converter = new MessagingMessageConverter();
+    DefaultKafkaHeaderMapper mapper = new DefaultKafkaHeaderMapper();
+    mapper.setEncodeStrings(true);
+    converter.setHeaderMapper(mapper);
+    return converter;
+}
+----
+====
+
+If using Spring Boot, it will auto configure this converter bean into the auto-configured `KafkaTemplate`; otherwise you should add this converter to the template.
+
 [[tombstones]]
 ==== Null Payloads and Log Compaction of 'Tombstone' Records
 
@@ -4535,6 +4813,7 @@ The exceptions that are considered fatal, by default, are:
 
 * `DeserializationException`
 * `MessageConversionException`
+* `ConversionException`
 * `MethodArgumentResolutionException`
 * `NoSuchMethodException`
 * `ClassCastException`
@@ -4550,7 +4829,7 @@ Here is an example that adds `IllegalArgumentException` to the not-retryable exc
 [source, java]
 ----
 @Bean
-public SeekToCurrentErrorHandler errorHandler(BiConsumer<ConsumerRecord<?, ?>, Exception> recoverer) {
+public SeekToCurrentErrorHandler errorHandler(ConsumerRecordRecoverer recoverer) {
     SeekToCurrentErrorHandler handler = new SeekToCurrentErrorHandler(recoverer);
     handler.addNotRetryableException(IllegalArgumentException.class);
     return handler;
@@ -4572,7 +4851,7 @@ Spring Framework provides two out of the box `BackOff` s, `FixedBackOff` and `Ex
 The maximum back off time must not exceed the `max.poll.interval.ms` consumer property, to avoid a rebalance.
 
 IMPORTANT: Previously, the configuration was "maxFailures" (which included the first delivery attempt).
-When using a `FixedBackOff`, its `maxAttempts` properties represents the number of delivery retries (one less than the old `maxFailures` property).
+When using a `FixedBackOff`, its `maxAttempts` property represents the number of delivery retries (one less than the old `maxFailures` property).
 Also, `maxFailures=-1` meant retry indefinitely with the old configuration, with a `BackOff` you would set the `maxAttempts` to `Long.MAX_VALUE` for a `FixedBackOff` and leave the `maxElapsedTime` to its default in an `ExponentialBackOff`.
 
 The `SeekToCurrentBatchErrorHandler` can also be configured with a `BackOff` to add a delay between delivery attempts.
@@ -4581,10 +4860,27 @@ However, since this error handler has no mechanism to "recover" after retries ar
 Again, the maximum delay must be less than the `max.poll.interval.ms` consumer property.
 Also see <<retrying-batch-eh>>.
 
-IMPORTANT: If the recoverer fails (throws an exception), the record will be included in the seeks and recovery will be attempted again during the next delivery.
+IMPORTANT: If the recoverer fails (throws an exception), the failed record will be included in the seeks.
+Starting with version 2.5.5, if the recoverer fails, the `BackOff` will be reset by default and redeliveries will again go through the back offs before recovery is attempted again.
+With earlier versions, the `BackOff` was not reset and recovery was re-attempted on the next failure.
+To revert to the previous behavior, set the error handler's `resetStateOnRecoveryFailure` to `false`.
 
 Starting with version 2.3.2, after a record has been recovered, its offset will be committed (if one of the container `AckMode` s is configured).
 To revert to the previous behavior, set the error handler's `ackAfterHandle` property to false.
+
+Starting with version 2.6, you can now provide the error handler with a `BiFunction<ConsumerRecord<?, ?>, Exception, BackOff>` to determine the `BackOff` to use, based on the failed record and/or the exception:
+
+====
+[source, java]
+----
+handler.setBackOffFunction((record, ex) -> { ... });
+----
+====
+
+If the function returns `null`, the handler's default `BackOff` will be used.
+
+Starting with version 2.6.3, set `resetStateOnExceptionChange` to `true` and the retry sequence will be restarted (including the selection of a new `BackOff`, if so configured) if the exception type changes between failures.
+By default, the exception type is not considered.
 
 Also see <<delivery-header>>.
 
@@ -4613,7 +4909,7 @@ As an alternative to the <<retrying-batch-eh>>, version 2.5 introduced the `Reco
 This is now the default error handler for batch listeners.
 The default configuration retries 9 times (10 delivery attempts) with no back off between deliveries.
 
-This error handler works in conjunction with the listener throwing a `BatchListenerFailedException` providing the index in the batch where the failure occurred.
+This error handler works in conjunction with the listener throwing a `BatchListenerFailedException` providing the index in the batch where the failure occurred (or the failed record itself).
 If the listener throws a different exception, or the index is out of range, the error handler falls back to invoking a `SeekToCurrentBatchErrorHandler` and the whole batch is retried, with no recovery available.
 The sequence of events is:
 
@@ -4684,7 +4980,26 @@ public void listen(List<Thing> things) {
 ----
 ====
 
-IMPORTANT: This error handler cannot be used with transactions.
+IMPORTANT: This error handler cannot be used with transactions
+
+IMPORTANT: If the recoverer fails (throws an exception), the failed record will be included in the seeks.
+Starting with version 2.5.5, if the recoverer fails, the `BackOff` will be reset by default and redeliveries will again go through the back offs before recovery is attempted again.
+With earlier versions, the `BackOff` was not reset and recovery was re-attempted on the next failure.
+To revert to the previous behavior, set the error handler's `resetStateOnRecoveryFailure` to `false`.
+
+Starting with version 2.6, you can now provide the error handler with a `BiFunction<ConsumerRecord<?, ?>, Exception, BackOff>` to determine the `BackOff` to use, based on the failed record and/or the exception:
+
+====
+[source, java]
+----
+handler.setBackOffFunction((record, ex) -> { ... });
+----
+====
+
+If the function returns `null`, the handler's default `BackOff` will be used.
+
+Starting with version 2.6.3, set `resetStateOnExceptionChange` to `true` and the retry sequence will be restarted (including the selection of a new `BackOff`, if so configured) if the exception type changes between failures.
+By default, the exception type is not considered.
 
 ===== Container Stopping Error Handlers
 
@@ -4736,13 +5051,31 @@ Starting with version 2.2.5, the `DefaultAfterRollbackProcessor` can be invoked 
 Then, if you are using the `DeadLetterPublishingRecoverer` to publish a failed record, the processor will send the recovered record's offset in the original topic/partition to the transaction.
 To enable this feature, set the `commitRecovered` and `kafkaTemplate` properties on the `DefaultAfterRollbackProcessor`.
 
-IMPORTANT: If the recoverer fails (throws an exception), the record will be included in the seeks and recovery will be attempted again during the next delivery.
+IMPORTANT: If the recoverer fails (throws an exception), the failed record will be included in the seeks.
+Starting with version 2.5.5, if the recoverer fails, the `BackOff` will be reset by default and redeliveries will again go through the back offs before recovery is attempted again.
+With earlier versions, the `BackOff` was not reset and recovery was re-attempted on the next failure.
+To revert to the previous behavior, set the processor's `resetStateOnRecoveryFailure` property to `false`.
+
+Starting with version 2.6, you can now provide the processor with a `BiFunction<ConsumerRecord<?, ?>, Exception, BackOff>` to determine the `BackOff` to use, based on the failed record and/or the exception:
+
+====
+[source, java]
+----
+handler.setBackOffFunction((record, ex) -> { ... });
+----
+====
+
+If the function returns `null`, the processor's default `BackOff` will be used.
+
+Starting with version 2.6.3, set `resetStateOnExceptionChange` to `true` and the retry sequence will be restarted (including the selection of a new `BackOff`, if so configured) if the exception type changes between failures.
+By default, the exception type is not considered.
 
 Starting with version 2.3.1, similar to the `SeekToCurrentErrorHandler`, the `DefaultAfterRollbackProcessor` considers certain exceptions to be fatal, and retries are skipped for such exceptions; the recoverer is invoked on the first failure.
 The exceptions that are considered fatal, by default, are:
 
 * `DeserializationException`
 * `MessageConversionException`
+* `ConversionException`
 * `MethodArgumentResolutionException`
 * `NoSuchMethodException`
 * `ClassCastException`
@@ -4767,6 +5100,13 @@ public DefaultAfterRollbackProcessor errorHandler(BiConsumer<ConsumerRecord<?, ?
 ====
 
 Also see <<delivery-header>>.
+
+IMPORTANT: With current `kafka-clients`, the container cannot detect whether a `ProducerFencedException` is caused by a rebalance or if the producer's `transactional.id` has been revoked due to a timeout or expiry.
+Because, in most cases, it is caused by a rebalance, the container does not call the `AfterRollbackProcessor` (because it's not appropriate to seek the partitions because we no longer are assigned them).
+If you ensure the timeout is large enough to process each transaction and periodically perform an "empty" transaction (e.g. via a `ListenerContainerIdleEvent`) you can avoid fencing due to timeout and expiry.
+Or, you can set the `stopContainerWhenFenced` container property to `true` and the container will stop, avoiding the loss of records.
+You can consume a `ConsumerStoppedEvent` and check the `Reason` property for `FENCED` to detect this condition.
+Since the event also has a reference to the container, you can restart the container using this event.
 
 [[delivery-header]]
 ===== Delivery Attempts Header
@@ -4835,6 +5175,13 @@ The record sent to the dead-letter topic is enhanced with the following headers:
 * `KafkaHeaders.DLT_ORIGINAL_TIMESTAMP`: The original timestamp.
 * `KafkaHeaders.DLT_ORIGINAL_TIMESTAMP_TYPE`: The original timestamp type.
 
+There are two mechanisms to add more headers.
+
+1. Subclass the recoverer and override `createProducerRecord()` - call `super.createProducerRecord()` and add more headers.
+2. Provide a `BiFunction` to receive the consumer record and exception, returning a `Headers` object; headers from there will be copied to the final producer record.
+Use `setHeadersFunction()` to set the `BiFunction`.
+
+The second is simpler to implement but the first has more information available, including the already assembled standard headers.
 
 Starting with version 2.3, when used in conjunction with an `ErrorHandlingDeserializer`, the publisher will restore the record `value()`, in the dead-letter producer record, to the original value that failed to be deserialized.
 Previously, the `value()` was null and user code had to decode the `DeserializationException` from the message headers.
@@ -4859,7 +5206,15 @@ public DeadLetterPublishingRecoverer publisher(KafkaTemplate<?, ?> stringTemplat
 The publisher uses the map keys to locate a template that is suitable for the `value()` about to be published.
 A `LinkedHashMap` is recommended so that the keys are examined in order.
 
-IMPORTANT: If the recoverer fails (throws an exception), the record will be included in the seeks and recovery will be attempted again during the next delivery.
+When publishing `null` values, when there are multiple templates, the recoverer will look for a template for the `Void` class; if none is present, the first template from the `values().iterator()` will be used.
+
+IMPORTANT: If the recoverer fails (throws an exception), the failed record will be included in the seeks.
+Starting with version 2.5.5, if the recoverer fails, the `BackOff` will be reset by default and redeliveries will again go through the back offs before recovery is attempted again.
+With earlier versions, the `BackOff` was not reset and recovery was re-attempted on the next failure.
+To revert to the previous behavior, set the error handler's `resetStateOnRecoveryFailure` property to `false`.
+
+Starting with version 2.6.3, set `resetStateOnExceptionChange` to `true` and the retry sequence will be restarted (including the selection of a new `BackOff`, if so configured) if the exception type changes between failures.
+By default, the exception type is not considered.
 
 Starting with version 2.3, the recoverer can also be used with Kafka Streams - see <<streams-deser-recovery>> for more information.
 
@@ -4867,8 +5222,36 @@ The `ErrorHandlingDeserializer` adds the deserialization exception(s) in headers
 By default, these headers are not retained in the message published to the dead letter topic, unless both the key and value fail deserialization.
 In that case, the `DLT_*` headers are based on the value deserialization and the key `DeserializationException` is retained in the header.
 
+If incoming records are dependent on each other, but may arrive out of order, it may be useful to republish a failed record to the tail of the original topic (for some number of times), instead of sending it directly to the dead letter topic.
+See https://stackoverflow.com/questions/64646996[this Stack Overflow Question] for an example.
+
+The following error handler configuration will do exactly that:
+
+====
+[source, java]
+----
+@Bean
+public ErrorHandler eh(KafkaOperations<String, String> template) {
+    return new SeekToCurrentErrorHandler(new DeadLetterPublishingRecoverer(template,
+            (rec, ex) -> {
+                org.apache.kafka.common.header.Header retries = rec.headers().lastHeader("retries");
+                if (retries == null) {
+                    retries = new RecordHeader("retries", new byte[] { 1 });
+                    rec.headers().add(retries);
+                }
+                else {
+                    retries.value()[0]++;
+                }
+                return retries.value()[0] > 5
+                        ? new TopicPartition("topic.DLT", rec.partition())
+                        : new TopicPartition("topic", rec.partition());
+            }), new FixedBackOff(0L, 0L));
+}
+----
+====
+
 [[kerberos]]
-==== Kerberos
+==== JAAS and Kerberos
 
 Starting with version 2.0, a `KafkaJaasLoginModuleInitializer` class has been added to assist with Kerberos configuration.
 You can add this bean, with the desired configuration, to your application context.

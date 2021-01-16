@@ -47,13 +47,6 @@ public class DelegatingSerializer implements Serializer<Object> {
 	private static final LogAccessor LOGGER = new LogAccessor(DelegatingDeserializer.class);
 
 	/**
-	 * Synonym for {@link #VALUE_SERIALIZATION_SELECTOR}.
-	 * @deprecated in favor of {@link #VALUE_SERIALIZATION_SELECTOR}.
-	 */
-	@Deprecated
-	public static final String SERIALIZATION_SELECTOR = "spring.kafka.serialization.selector";
-
-	/**
 	 * Name of the header containing the serialization selector for values.
 	 */
 	public static final String VALUE_SERIALIZATION_SELECTOR = "spring.kafka.serialization.selector";
@@ -62,13 +55,6 @@ public class DelegatingSerializer implements Serializer<Object> {
 	 * Name of the header containing the serialization selector for keys.
 	 */
 	public static final String KEY_SERIALIZATION_SELECTOR = "spring.kafka.key.serialization.selector";
-
-	/**
-	 * Synonym for {@link #VALUE_SERIALIZATION_SELECTOR_CONFIG}.
-	 * @deprecated in favor of {@link #VALUE_SERIALIZATION_SELECTOR_CONFIG}.
-	 */
-	@Deprecated
-	public static final String SERIALIZATION_SELECTOR_CONFIG = "spring.kafka.serialization.selector.config";
 
 	/**
 	 * Name of the configuration property containing the serialization selector map for
@@ -177,11 +163,11 @@ public class DelegatingSerializer implements Serializer<Object> {
 			Map<String, Serializer<?>> delegateMap, String selector, Class<?> clazz) {
 
 		try {
-			Serializer<?> delegate = (Serializer<?>) clazz.newInstance();
+			Serializer<?> delegate = (Serializer<?>) clazz.getDeclaredConstructor().newInstance();
 			delegate.configure(configs, isKey);
 			delegateMap.put(selector.trim(), delegate);
 		}
-		catch (InstantiationException | IllegalAccessException e) {
+		catch (Exception e) {
 			throw new IllegalArgumentException(e);
 		}
 	}

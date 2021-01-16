@@ -68,10 +68,24 @@ public class DefaultKafkaHeaderMapperTests {
 				.setHeader("simpleContentType", MimeTypeUtils.TEXT_PLAIN_VALUE)
 				.setHeader("customToString", new Bar("fiz"))
 				.setHeader("uri", URI.create("https://foo.bar"))
+				.setHeader("intA", new int[] { 42 })
+				.setHeader("longA", new long[] { 42L })
+				.setHeader("floatA", new float[] { 1.0f })
+				.setHeader("doubleA", new double[] { 1.0 })
+				.setHeader("charA", new char[] { 'c' })
+				.setHeader("boolA", new boolean[] { true })
+				.setHeader("IntA", new Integer[] { 42 })
+				.setHeader("LongA", new Long[] { 42L })
+				.setHeader("FloatA", new Float[] { 1.0f })
+				.setHeader("DoubleA", new Double[] { 1.0 })
+				.setHeader("CharA", new Character[] { 'c' })
+				.setHeader("BoolA", new Boolean[] { true })
+				.setHeader("stringA", new String[] { "array" })
 				.build();
 		RecordHeaders recordHeaders = new RecordHeaders();
 		mapper.fromHeaders(message.getHeaders(), recordHeaders);
-		assertThat(recordHeaders.toArray().length).isEqualTo(10); // 9 + json_types
+		int expectedSize = message.getHeaders().size() - 3; // ID, Timestamp, reply channel
+		assertThat(recordHeaders.toArray().length).isEqualTo(expectedSize + 1); // json_types header
 		Map<String, Object> headers = new HashMap<>();
 		mapper.toHeaders(recordHeaders, headers);
 		assertThat(headers.get("foo")).isInstanceOf(byte[].class);
@@ -85,10 +99,21 @@ public class DefaultKafkaHeaderMapperTests {
 		assertThat(headers.get(MessageHeaders.ERROR_CHANNEL)).isEqualTo("errors");
 		assertThat(headers.get("customToString")).isEqualTo("Bar [field=fiz]");
 		assertThat(headers.get("uri")).isEqualTo(URI.create("https://foo.bar"));
+		assertThat(headers.get("intA")).isEqualTo(new int[] { 42 });
+		assertThat(headers.get("longA")).isEqualTo(new long[] { 42L });
+		assertThat(headers.get("floatA")).isEqualTo(new float[] { 1.0f });
+		assertThat(headers.get("doubleA")).isEqualTo(new double[] { 1.0 });
+		assertThat(headers.get("charA")).isEqualTo(new char[] { 'c' });
+		assertThat(headers.get("IntA")).isEqualTo(new Integer[] { 42 });
+		assertThat(headers.get("LongA")).isEqualTo(new Long[] { 42L });
+		assertThat(headers.get("FloatA")).isEqualTo(new Float[] { 1.0f });
+		assertThat(headers.get("DoubleA")).isEqualTo(new Double[] { 1.0 });
+		assertThat(headers.get("CharA")).isEqualTo(new Character[] { 'c' });
+		assertThat(headers.get("stringA")).isEqualTo(new String[] { "array" });
 		NonTrustedHeaderType ntht = (NonTrustedHeaderType) headers.get("fix");
 		assertThat(ntht.getHeaderValue()).isNotNull();
 		assertThat(ntht.getUntrustedType()).isEqualTo(Foo.class.getName());
-		assertThat(headers).hasSize(9);
+		assertThat(headers).hasSize(expectedSize);
 
 		mapper.addTrustedPackages(getClass().getPackage().getName());
 		headers = new HashMap<>();
@@ -97,7 +122,7 @@ public class DefaultKafkaHeaderMapperTests {
 		assertThat(new String((byte[]) headers.get("foo"))).isEqualTo("bar");
 		assertThat(headers.get("baz")).isEqualTo("qux");
 		assertThat(headers.get("fix")).isEqualTo(new Foo());
-		assertThat(headers).hasSize(9);
+		assertThat(headers).hasSize(expectedSize);
 	}
 
 	@Test

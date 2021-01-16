@@ -227,7 +227,10 @@ public class ConcurrentMessageListenerContainerTests {
 					String clientIdSuffixArg, Properties properties) {
 
 				overrides.set(properties);
-				return super.createKafkaConsumer(groupId, clientIdPrefix, clientIdSuffixArg, properties);
+				Consumer<Integer, String> created = super.createKafkaConsumer(groupId, clientIdPrefix,
+						clientIdSuffixArg, properties);
+				assertThat(KafkaTestUtils.getPropertyValue(created, "requestTimeoutMs", Long.class)).isEqualTo(23000L);
+				return created;
 			}
 
 		};
@@ -240,8 +243,11 @@ public class ConcurrentMessageListenerContainerTests {
 			listenerThreadNames.add(Thread.currentThread().getName());
 			latch.countDown();
 		});
-		Properties consumerProperties = new Properties();
+		Properties nestedProps = new Properties();
+		nestedProps.put("weCantAccessThisOne", 42);
+		Properties consumerProperties = new Properties(nestedProps);
 		consumerProperties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+		consumerProperties.put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, 23000);
 		containerProps.setKafkaConsumerProperties(consumerProperties);
 		final CountDownLatch rebalancePartitionsAssignedLatch = new CountDownLatch(2);
 		containerProps.setConsumerRebalanceListener(new ConsumerRebalanceListener() {
@@ -694,7 +700,6 @@ public class ConcurrentMessageListenerContainerTests {
 		testAckOnErrorWithManualImmediateGuts(topic11, false);
 	}
 
-	@SuppressWarnings("deprecation")
 	private void testAckOnErrorWithManualImmediateGuts(String topic, boolean ackOnError) throws Exception {
 		logger.info("Start ack on error with ManualImmediate ack mode");
 		Map<String, Object> props = KafkaTestUtils.consumerProps("testMan" + ackOnError, "false", embeddedKafka);
@@ -703,7 +708,6 @@ public class ConcurrentMessageListenerContainerTests {
 		ContainerProperties containerProps = new ContainerProperties(topic);
 		containerProps.setSyncCommits(true);
 		containerProps.setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-		containerProps.setAckOnError(ackOnError);
 		containerProps.setMessageListener((AcknowledgingMessageListener<Integer, String>) (message, ack) -> {
 			ConcurrentMessageListenerContainerTests.this.logger.info("manualExisting: " + message);
 			latch.countDown();

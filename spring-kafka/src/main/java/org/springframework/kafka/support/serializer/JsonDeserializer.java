@@ -17,6 +17,9 @@
 package org.springframework.kafka.support.serializer;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
@@ -94,12 +97,14 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	public static final String USE_TYPE_INFO_HEADERS = "spring.json.use.type.headers";
 
 	/**
-	 * A method name to determine the {@link JavaType} to deserialize the key to.
+	 * A method name to determine the {@link JavaType} to deserialize the key to:
+	 * 'com.Foo.deserialize'. See {@link JsonTypeResolver#resolveType} for the signature.
 	 */
 	public static final String KEY_TYPE_METHOD = "spring.json.key.type.method";
 
 	/**
-	 * A method name to determine the {@link JavaType} to deserialize the key to.
+	 * A method name to determine the {@link JavaType} to deserialize the value to:
+	 * 'com.Foo.deserialize'. See {@link JsonTypeResolver#resolveType} for the signature.
 	 */
 	public static final String VALUE_TYPE_METHOD = "spring.json.value.type.method";
 
@@ -117,7 +122,7 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 
 	private boolean useTypeHeaders = true;
 
-	private BiFunction<byte[], Headers, JavaType> typeFunction;
+	private JsonTypeResolver typeResolver;
 
 	/**
 	 * Construct an instance with a default {@link ObjectMapper}.
@@ -139,7 +144,7 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	 * {@link ObjectMapper}.
 	 * @param targetType the target type to use if no type info headers are present.
 	 */
-	public JsonDeserializer(Class<? super T> targetType) {
+	public JsonDeserializer(@Nullable Class<? super T> targetType) {
 		this(targetType, true);
 	}
 
@@ -148,7 +153,17 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	 * @param targetType the target type reference to use if no type info headers are present.
 	 * @since 2.3
 	 */
-	public JsonDeserializer(TypeReference<? super T> targetType) {
+	public JsonDeserializer(@Nullable TypeReference<? super T> targetType) {
+		this(targetType, true);
+	}
+
+
+	/**
+	 * Construct an instance with the provided target type, and a default {@link ObjectMapper}.
+	 * @param targetType the target java type to use if no type info headers are present.
+	 * @since 2.3
+	 */
+	public JsonDeserializer(@Nullable JavaType targetType) {
 		this(targetType, true);
 	}
 
@@ -177,6 +192,18 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	}
 
 	/**
+	 * Construct an instance with the provided target type, and
+	 * useHeadersIfPresent with a default {@link ObjectMapper}.
+	 * @param targetType the target java type.
+	 * @param useHeadersIfPresent true to use headers if present and fall back to target
+	 * type if not.
+	 * @since 2.3
+	 */
+	public JsonDeserializer(JavaType targetType, boolean useHeadersIfPresent) {
+		this(targetType, JacksonUtils.enhancedObjectMapper(), useHeadersIfPresent);
+	}
+
+	/**
 	 * Construct an instance with the provided target type, and {@link ObjectMapper}.
 	 * @param targetType the target type to use if no type info headers are present.
 	 * @param objectMapper the mapper. type if not.
@@ -191,6 +218,15 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	 * @param objectMapper the mapper. type if not.
 	 */
 	public JsonDeserializer(TypeReference<? super T> targetType, ObjectMapper objectMapper) {
+		this(targetType, objectMapper, true);
+	}
+
+	/**
+	 * Construct an instance with the provided target type, and {@link ObjectMapper}.
+	 * @param targetType the target java type to use if no type info headers are present.
+	 * @param objectMapper the mapper. type if not.
+	 */
+	public JsonDeserializer(JavaType targetType, ObjectMapper objectMapper) {
 		this(targetType, objectMapper, true);
 	}
 
@@ -314,7 +350,17 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	 * @since 2.5
 	 */
 	public void setTypeFunction(BiFunction<byte[], Headers, JavaType> typeFunction) {
-		this.typeFunction = typeFunction;
+		this.typeResolver = (topic, data, headers) -> typeFunction.apply(data, headers);
+	}
+
+	/**
+	 * Set a {@link JsonTypeResolver} that receives the data to be deserialized and the headers
+	 * and returns a JavaType.
+	 * @param typeResolver the resolver.
+	 * @since 2.5.3
+	 */
+	public void setTypeResolver(JsonTypeResolver typeResolver) {
+		this.typeResolver = typeResolver;
 	}
 
 	@Override
@@ -340,16 +386,26 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 
 	private void setUpTypeMethod(Map<String, ?> configs, boolean isKey) {
 		if (isKey && configs.containsKey(KEY_TYPE_METHOD)) {
-			setUpTypeFuntion((String) configs.get(KEY_TYPE_METHOD));
+			setUpTypeResolver((String) configs.get(KEY_TYPE_METHOD));
 		}
 		else if (!isKey && configs.containsKey(VALUE_TYPE_METHOD)) {
-			setUpTypeFuntion((String) configs.get(VALUE_TYPE_METHOD));
+			setUpTypeResolver((String) configs.get(VALUE_TYPE_METHOD));
 		}
 	}
 
-	private void setUpTypeFuntion(String method) {
-		this.typeFunction = SerializationUtils.propertyToMethodInvokingFunction(method, byte[].class,
-				getClass().getClassLoader());
+	private void setUpTypeResolver(String method) {
+		try {
+			this.typeResolver = buildTypeResolver(method);
+		}
+		catch (IllegalStateException e) {
+			if (e.getCause() instanceof NoSuchMethodException) {
+				this.typeResolver = (topic, data, headers) ->
+					(JavaType) SerializationUtils.propertyToMethodInvokingFunction(
+							method, byte[].class, getClass().getClassLoader()).apply(data, headers);
+				return;
+			}
+			throw e;
+		}
 	}
 
 	private void setUpTypePrecedence(Map<String, ?> configs) {
@@ -441,8 +497,8 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 		}
 		ObjectReader deserReader = null;
 		JavaType javaType = null;
-		if (this.typeFunction != null) {
-			javaType = this.typeFunction.apply(data, headers);
+		if (this.typeResolver != null) {
+			javaType = this.typeResolver.resolveType(topic, data, headers);
 		}
 		if (javaType == null && this.typeMapper.getTypePrecedence().equals(TypePrecedence.TYPE_ID)) {
 			javaType = this.typeMapper.toJavaType(headers);
@@ -472,8 +528,8 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 			return null;
 		}
 		ObjectReader localReader = this.reader;
-		if (this.typeFunction != null) {
-			JavaType javaType = this.typeFunction.apply(data, null);
+		if (this.typeResolver != null) {
+			JavaType javaType = this.typeResolver.resolveType(topic, data, null);
 			if (javaType != null) {
 				localReader = this.objectMapper.readerFor(javaType);
 			}
@@ -491,6 +547,43 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	@Override
 	public void close() {
 		// No-op
+	}
+
+	/**
+	 * Copies this deserializer with same configuration, except new target type is used.
+	 * @param newTargetType type used for when type headers are missing, not null
+	 * @param <X> new deserialization result type
+	 * @return new instance of deserializer with type changes
+	 * @since 2.6
+	 */
+	public <X> JsonDeserializer<X> copyWithType(Class<? super X> newTargetType) {
+		return copyWithType(this.objectMapper.constructType(newTargetType));
+	}
+
+	/**
+	 * Copies this deserializer with same configuration, except new target type reference is used.
+	 * @param newTargetType type reference used for when type headers are missing, not null
+	 * @param <X> new deserialization result type
+	 * @return new instance of deserializer with type changes
+	 * @since 2.6
+	 */
+	public <X> JsonDeserializer<X> copyWithType(TypeReference<? super X> newTargetType) {
+		return copyWithType(this.objectMapper.constructType(newTargetType.getType()));
+	}
+
+	/**
+	 * Copies this deserializer with same configuration, except new target java type is used.
+	 * @param newTargetType java type used for when type headers are missing, not null
+	 * @param <X> new deserialization result type
+	 * @return new instance of deserializer with type changes
+	 * @since 2.6
+	 */
+	public <X> JsonDeserializer<X> copyWithType(JavaType newTargetType) {
+		JsonDeserializer<X> result = new JsonDeserializer<>(newTargetType, this.objectMapper, this.useTypeHeaders);
+		result.removeTypeHeaders = this.removeTypeHeaders;
+		result.typeMapper = this.typeMapper;
+		result.typeMapperExplicitlySet = this.typeMapperExplicitlySet;
+		return result;
 	}
 
 	// Fluent API
@@ -562,6 +655,50 @@ public class JsonDeserializer<T> implements Deserializer<T> {
 	public JsonDeserializer<T> typeFunction(BiFunction<byte[], Headers, JavaType> typeFunction) {
 		setTypeFunction(typeFunction);
 		return this;
+	}
+
+	/**
+	 * Set a {@link JsonTypeResolver} that receives the data to be deserialized and the headers
+	 * and returns a JavaType.
+	 * @param resolver the resolver.
+	 * @return the deserializer.
+	 * @since 2.5.3
+	 */
+	public JsonDeserializer<T> typeResolver(JsonTypeResolver resolver) {
+		setTypeResolver(resolver);
+		return this;
+	}
+
+	private JsonTypeResolver buildTypeResolver(String methodProperty) {
+		int lastDotPosn = methodProperty.lastIndexOf('.');
+		Assert.state(lastDotPosn > 1,
+				"the method property needs to be a class name followed by the method name, separated by '.'");
+		Class<?> clazz;
+		try {
+			clazz = ClassUtils.forName(methodProperty.substring(0, lastDotPosn), getClass().getClassLoader());
+		}
+		catch (ClassNotFoundException | LinkageError e) {
+			throw new IllegalStateException(e);
+		}
+		String methodName = methodProperty.substring(lastDotPosn + 1);
+		Method method;
+		try {
+			method = clazz.getDeclaredMethod(methodName, String.class, byte[].class, Headers.class);
+			Assert.state(JavaType.class.isAssignableFrom(method.getReturnType()),
+					method + " return type must be JavaType");
+			Assert.state(Modifier.isStatic(method.getModifiers()), method + " must be static");
+		}
+		catch (SecurityException | NoSuchMethodException e) {
+			throw new IllegalStateException(e);
+		}
+		return (topic, data, headers) -> {
+			try {
+				return (JavaType) method.invoke(null, topic, data, headers);
+			}
+			catch (IllegalAccessException | IllegalArgumentException | InvocationTargetException e) {
+				throw new IllegalStateException(e);
+			}
+		};
 	}
 
 }

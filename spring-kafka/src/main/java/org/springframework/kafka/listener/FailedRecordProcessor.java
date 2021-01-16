@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 
 import org.apache.commons.logging.LogFactory;
@@ -28,6 +29,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.classify.BinaryExceptionClassifier;
 import org.springframework.core.log.LogAccessor;
 import org.springframework.kafka.support.TopicPartitionOffset;
+import org.springframework.kafka.support.converter.ConversionException;
 import org.springframework.kafka.support.serializer.DeserializationException;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.converter.MessageConversionException;
@@ -52,7 +54,7 @@ public abstract class FailedRecordProcessor extends KafkaExceptionLogLevelAware 
 
 	private final FailedRecordTracker failureTracker;
 
-	private BinaryExceptionClassifier classifier;
+	private ExtendedBinaryExceptionClassifier classifier;
 
 	private boolean commitRecovered;
 
@@ -85,6 +87,7 @@ public abstract class FailedRecordProcessor extends KafkaExceptionLogLevelAware 
 	 * @param classifications the classifications.
 	 * @param defaultValue whether or not to retry non-matching exceptions.
 	 * @see BinaryExceptionClassifier#BinaryExceptionClassifier(Map, boolean)
+	 * @see #addNotRetryableExceptions(Class...)
 	 */
 	public void setClassifications(Map<Class<? extends Throwable>, Boolean> classifications, boolean defaultValue) {
 		Assert.notNull(classifications, "'classifications' + cannot be null");
@@ -107,39 +110,81 @@ public abstract class FailedRecordProcessor extends KafkaExceptionLogLevelAware 
 		this.commitRecovered = commitRecovered;
 	}
 
+	/**
+	 * Set a function to dynamically determine the {@link BackOff} to use, based on the
+	 * consumer record and/or exception. If null is returned, the default BackOff will be
+	 * used.
+	 * @param backOffFunction the function.
+	 * @since 2.6
+	 */
+	public void setBackOffFunction(BiFunction<ConsumerRecord<?, ?>, Exception, BackOff> backOffFunction) {
+		this.failureTracker.setBackOffFunction(backOffFunction);
+	}
+
+	/**
+	 * Set to false to immediately attempt to recover on the next attempt instead
+	 * of repeating the BackOff cycle when recovery fails.
+	 * @param resetStateOnRecoveryFailure false to retain state.
+	 * @since 2.5.5
+	 */
+	public void setResetStateOnRecoveryFailure(boolean resetStateOnRecoveryFailure) {
+		this.failureTracker.setResetStateOnRecoveryFailure(resetStateOnRecoveryFailure);
+	}
+
+	/**
+	 * Set to true to reset the retry {@link BackOff} if the exception is a different type
+	 * to the previous failure for the same record. The
+	 * {@link #setBackOffFunction(BiFunction) backOffFunction}, if provided, will be
+	 * called to get the {@link BackOff} to use for the new exception; otherwise, the
+	 * configured {@link BackOff} will be used.
+	 * @param resetStateOnExceptionChange true to reset.
+	 * @since 2.6.3
+	 */
+	public void setResetStateOnExceptionChange(boolean resetStateOnExceptionChange) {
+		this.failureTracker.setResetStateOnExceptionChange(resetStateOnExceptionChange);
+	}
+
 	@Override
 	public int deliveryAttempt(TopicPartitionOffset topicPartitionOffset) {
 		return this.failureTracker.deliveryAttempt(topicPartitionOffset);
 	}
 
 	/**
-	 * Add an exception type to the default list; if and only if an external classifier
-	 * has not been provided. By default, the following exceptions will not be retried:
+	 * Add exception types to the default list. By default, the following exceptions will
+	 * not be retried:
 	 * <ul>
 	 * <li>{@link DeserializationException}</li>
 	 * <li>{@link MessageConversionException}</li>
+	 * <li>{@link ConversionException}</li>
 	 * <li>{@link MethodArgumentResolutionException}</li>
 	 * <li>{@link NoSuchMethodException}</li>
 	 * <li>{@link ClassCastException}</li>
 	 * </ul>
 	 * All others will be retried.
-	 * @param exceptionType the exception type.
+	 * @param exceptionTypes the exception types.
+	 * @since 2.6
 	 * @see #removeNotRetryableException(Class)
 	 * @see #setClassifications(Map, boolean)
 	 */
-	public void addNotRetryableException(Class<? extends Exception> exceptionType) {
-		Assert.isTrue(this.classifier instanceof ExtendedBinaryExceptionClassifier,
-				"Cannot add exception types to a supplied classifier");
-		((ExtendedBinaryExceptionClassifier) this.classifier).getClassified().put(exceptionType, false);
+	@SafeVarargs
+	@SuppressWarnings("varargs")
+	public final void addNotRetryableExceptions(Class<? extends Exception>... exceptionTypes) {
+		Assert.notNull(exceptionTypes, "'exceptionTypes' cannot be null");
+		Assert.noNullElements(exceptionTypes, "'exceptionTypes' cannot contain nulls");
+		for (Class<? extends Exception> exceptionType : exceptionTypes) {
+			Assert.isTrue(Exception.class.isAssignableFrom(exceptionType),
+					() -> "exceptionType " + exceptionType + " must be an Exception");
+			this.classifier.getClassified().put(exceptionType, false);
+		}
 	}
 
 	/**
-	 * Remove an exception type from the configured list; if and only if an external
-	 * classifier has not been provided. By default, the following exceptions will not be
-	 * retried:
+	 * Remove an exception type from the configured list. By default, the following
+	 * exceptions will not be retried:
 	 * <ul>
 	 * <li>{@link DeserializationException}</li>
 	 * <li>{@link MessageConversionException}</li>
+	 * <li>{@link ConversionException}</li>
 	 * <li>{@link MethodArgumentResolutionException}</li>
 	 * <li>{@link NoSuchMethodException}</li>
 	 * <li>{@link ClassCastException}</li>
@@ -147,13 +192,11 @@ public abstract class FailedRecordProcessor extends KafkaExceptionLogLevelAware 
 	 * All others will be retried.
 	 * @param exceptionType the exception type.
 	 * @return true if the removal was successful.
-	 * @see #addNotRetryableException(Class)
+	 * @see #addNotRetryableExceptions(Class...)
 	 * @see #setClassifications(Map, boolean)
 	 */
 	public boolean removeNotRetryableException(Class<? extends Exception> exceptionType) {
-		Assert.isTrue(this.classifier instanceof ExtendedBinaryExceptionClassifier,
-				"Cannot remove exception types from a supplied classifier");
-		return ((ExtendedBinaryExceptionClassifier) this.classifier).getClassified().remove(exceptionType);
+		return this.classifier.getClassified().remove(exceptionType);
 	}
 
 	protected BiPredicate<ConsumerRecord<?, ?>, Exception> getSkipPredicate(List<ConsumerRecord<?, ?>> records,
@@ -168,7 +211,8 @@ public abstract class FailedRecordProcessor extends KafkaExceptionLogLevelAware 
 			}
 			catch (Exception ex) {
 				if (records.size() > 0) {
-					this.logger.error(ex, () -> "Recovery of record (" + records.get(0) + ") failed");
+					this.logger.error(ex, () -> "Recovery of record ("
+							+ ListenerUtils.recordToString(records.get(0)) + ") failed");
 				}
 				return NEVER_SKIP_PREDICATE;
 			}
@@ -180,10 +224,11 @@ public abstract class FailedRecordProcessor extends KafkaExceptionLogLevelAware 
 		this.failureTracker.clearThreadState();
 	}
 
-	private static BinaryExceptionClassifier configureDefaultClassifier() {
+	private static ExtendedBinaryExceptionClassifier configureDefaultClassifier() {
 		Map<Class<? extends Throwable>, Boolean> classified = new HashMap<>();
 		classified.put(DeserializationException.class, false);
 		classified.put(MessageConversionException.class, false);
+		classified.put(ConversionException.class, false);
 		classified.put(MethodArgumentResolutionException.class, false);
 		classified.put(NoSuchMethodException.class, false);
 		classified.put(ClassCastException.class, false);

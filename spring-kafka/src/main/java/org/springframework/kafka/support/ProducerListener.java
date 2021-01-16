@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package org.springframework.kafka.support;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 
+import org.springframework.lang.Nullable;
+
 /**
  * Listener for handling outbound Kafka messages. Exactly one of its methods will be invoked, depending on whether
  * the write has been acknowledged or not.
@@ -31,7 +33,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
  *
  * @author Marius Bogoevici
  * @author Gary Russell
- * @author Endika Guti?rrez
+ * @author Endika Gutiérrez
  *
  * @see org.apache.kafka.clients.producer.Callback
  */
@@ -43,56 +45,21 @@ public interface ProducerListener<K, V> {
 	 * @param recordMetadata the result of the successful send operation
 	 */
 	default void onSuccess(ProducerRecord<K, V> producerRecord, RecordMetadata recordMetadata) {
-		onSuccess(producerRecord.topic(), producerRecord.partition(),
-				producerRecord.key(), producerRecord.value(), recordMetadata);
-	}
-
-	/**
-	 * Invoked after the successful send of a message (that is, after it has been acknowledged by the broker).
-	 * If the method receiving the ProducerRecord is overridden, this method won't be called
-	 * @param topic the destination topic
-	 * @param partition the destination partition (could be null)
-	 * @param key the key of the outbound message
-	 * @param value the payload of the outbound message
-	 * @param recordMetadata the result of the successful send operation
-	 * @deprecated in favor of {@link #onSuccess(ProducerRecord, RecordMetadata)}.
-	 */
-	@Deprecated
-	default void onSuccess(String topic, Integer partition, K key, V value, RecordMetadata recordMetadata) {
 	}
 
 	/**
 	 * Invoked after an attempt to send a message has failed.
 	 * @param producerRecord the failed record
+	 * @param recordMetadata The metadata for the record that was sent (i.e. the partition
+	 * and offset). If an error occurred, metadata will contain only valid topic and maybe
+	 * the partition. If the partition is not provided in the ProducerRecord and an error
+	 * occurs before partition is assigned, then the partition will be set to
+	 * RecordMetadata.UNKNOWN_PARTITION.
 	 * @param exception the exception thrown
+	 * @since 2.6.2
 	 */
-	default void onError(ProducerRecord<K, V> producerRecord, Exception exception) {
-		onError(producerRecord.topic(), producerRecord.partition(),
-				producerRecord.key(), producerRecord.value(), exception);
-	}
-
-	/**
-	 * Invoked after an attempt to send a message has failed.
-	 * If the method receiving the ProducerRecord is overridden, this method won't be called
-	 * @param topic the destination topic
-	 * @param partition the destination partition (could be null)
-	 * @param key the key of the outbound message
-	 * @param value the payload of the outbound message
-	 * @param exception the exception thrown
-	 * @deprecated in favor of {@link #onError(ProducerRecord, Exception)}.
-	 */
-	@Deprecated
-	default void onError(String topic, Integer partition, K key, V value, Exception exception) {
-	}
-
-	/**
-	 * Return true if this listener is interested in success as well as failure.
-	 * @deprecated the result of this method will be ignored.
-	 * @return true to express interest in successful sends.
-	 */
-	@Deprecated
-	default boolean isInterestedInSuccess() {
-		return false;
+	default void onError(ProducerRecord<K, V> producerRecord, @Nullable RecordMetadata recordMetadata,
+			Exception exception) {
 	}
 
 }

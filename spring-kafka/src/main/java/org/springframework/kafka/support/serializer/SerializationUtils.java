@@ -52,7 +52,7 @@ public final class SerializationUtils {
 	public static <P, T> BiFunction<P, Headers, T> propertyToMethodInvokingFunction(String methodProperty,
 			Class<P> payloadType, ClassLoader classLoader) {
 
-		int lastDotPosn = methodProperty.lastIndexOf(".");
+		int lastDotPosn = methodProperty.lastIndexOf('.');
 		Assert.state(lastDotPosn > 1,
 				"the method property needs to be a class name followed by the method name, separated by '.'");
 		BiFunction<P, Headers, T> function;
@@ -73,10 +73,19 @@ public final class SerializationUtils {
 				method = clazz.getDeclaredMethod(methodName, payloadType);
 			}
 			catch (@SuppressWarnings("unused") NoSuchMethodException e1) {
-				throw new IllegalStateException("the parser method must take '(String, Headers)' or '(String)'");
+				IllegalStateException ise =
+						new IllegalStateException("the parser method must take '("
+								+ payloadType.getSimpleName()
+								+ ", Headers)' or '("
+								+ payloadType.getSimpleName()
+								+ ")'", e1);
+				ise.addSuppressed(e);
+				throw ise; // NOSONAR, lost stack trace
 			}
 			catch (SecurityException e1) {
-				throw new IllegalStateException(e1);
+				IllegalStateException ise = new IllegalStateException(e1);
+				ise.addSuppressed(e);
+				throw ise; // NOSONAR, lost stack trace
 			}
 		}
 		catch (SecurityException e) {

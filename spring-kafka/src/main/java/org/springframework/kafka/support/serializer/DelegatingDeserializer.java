@@ -42,16 +42,6 @@ import org.springframework.util.StringUtils;
  */
 public class DelegatingDeserializer implements Deserializer<Object> {
 
-	/**
-	 * Name of the configuration property containing the serialization selector map with
-	 * format {@code selector:class,...}.
-	 * @deprecated Use {@link DelegatingSerializer#VALUE_SERIALIZATION_SELECTOR} or
-	 * {@link DelegatingSerializer#KEY_SERIALIZATION_SELECTOR}.
-	 */
-	@Deprecated
-	public static final String SERIALIZATION_SELECTOR_CONFIG = DelegatingSerializer.SERIALIZATION_SELECTOR_CONFIG;
-
-
 	private final Map<String, Deserializer<? extends Object>> delegates = new ConcurrentHashMap<>();
 
 	private final Map<String, Object> autoConfigs = new HashMap<>();
@@ -70,8 +60,9 @@ public class DelegatingDeserializer implements Deserializer<Object> {
 	/**
 	 * Construct an instance with the supplied mapping of selectors to delegate
 	 * deserializers. The selector must be supplied in the
-	 * {@link DelegatingSerializer#SERIALIZATION_SELECTOR} header. It is not necessary to
-	 * configure standard deserializers supported by {@link Serdes}.
+	 * {@link DelegatingSerializer#KEY_SERIALIZATION_SELECTOR_CONFIG} and
+	 * {@link DelegatingSerializer#VALUE_SERIALIZATION_SELECTOR_CONFIG} headers. It is not
+	 * necessary to configure standard deserializers supported by {@link Serdes}.
 	 * @param delegates the map of delegates.
 	 */
 	public DelegatingDeserializer(Map<String, Deserializer<?>> delegates) {
@@ -148,11 +139,11 @@ public class DelegatingDeserializer implements Deserializer<Object> {
 			Map<String, Deserializer<?>> delegateMap, String selector, Class<?> clazz) {
 
 		try {
-			Deserializer<?> delegate = (Deserializer<?>) clazz.newInstance();
+			Deserializer<?> delegate = (Deserializer<?>) clazz.getDeclaredConstructor().newInstance();
 			delegate.configure(configs, isKey);
 			delegateMap.put(selector.trim(), delegate);
 		}
-		catch (InstantiationException | IllegalAccessException e) {
+		catch (Exception e) {
 			throw new IllegalArgumentException(e);
 		}
 	}

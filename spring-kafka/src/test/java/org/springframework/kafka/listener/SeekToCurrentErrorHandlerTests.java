@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
 import org.springframework.kafka.KafkaException;
+import org.springframework.kafka.support.converter.ConversionException;
 import org.springframework.kafka.support.serializer.DeserializationException;
 
 /**
@@ -48,6 +49,7 @@ public class SeekToCurrentErrorHandlerTests {
 
 	@Test
 	public void testClassifier() {
+		ListenerUtils.setLogOnlyMetadata(true);
 		AtomicReference<ConsumerRecord<?, ?>> recovered = new AtomicReference<>();
 		AtomicBoolean recovererShouldFail = new AtomicBoolean(false);
 		SeekToCurrentErrorHandler handler = new SeekToCurrentErrorHandler((r, t) -> {
@@ -67,7 +69,11 @@ public class SeekToCurrentErrorHandlerTests {
 		handler.handle(new DeserializationException("intended", null, false, illegalState), records,
 				consumer, mock(MessageListenerContainer.class));
 		assertThat(recovered.get()).isSameAs(record1);
-		handler.addNotRetryableException(IllegalStateException.class);
+		recovered.set(null);
+		handler.handle(new ConversionException("intended", null), records,
+				consumer, mock(MessageListenerContainer.class));
+		assertThat(recovered.get()).isSameAs(record1);
+		handler.addNotRetryableExceptions(IllegalStateException.class);
 		recovered.set(null);
 		recovererShouldFail.set(true);
 		assertThatExceptionOfType(RuntimeException.class).isThrownBy(() ->
@@ -76,7 +82,7 @@ public class SeekToCurrentErrorHandlerTests {
 		assertThat(recovered.get()).isSameAs(record1);
 		InOrder inOrder = inOrder(consumer);
 		inOrder.verify(consumer).seek(new TopicPartition("foo", 0), 0L); // not recovered so seek
-		inOrder.verify(consumer, times(2)).seek(new TopicPartition("foo", 1), 1L);
+		inOrder.verify(consumer, times(3)).seek(new TopicPartition("foo", 1), 1L);
 		inOrder.verify(consumer).seek(new TopicPartition("foo", 0), 0L); // recovery failed
 		inOrder.verify(consumer, times(2)).seek(new TopicPartition("foo", 1), 1L);
 		inOrder.verifyNoMoreInteractions();

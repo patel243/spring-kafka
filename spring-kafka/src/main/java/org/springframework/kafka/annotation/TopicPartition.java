@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,17 +40,18 @@ public @interface TopicPartition {
 	String topic();
 
 	/**
-	 * The partitions within the topic.
-	 * Partitions specified here can't be duplicated in {@link #partitionOffsets()}.
-	 * @return the partitions within the topic. Property place
-	 * holders and SpEL expressions are supported, which must
-	 * resolve to Integers (or Strings that can be parsed as
-	 * Integers).
+	 * The partitions within the topic. Partitions specified here can't be duplicated in
+	 * {@link #partitionOffsets()}. Each string can contain a comma-delimited list of
+	 * partitions, or ranges of partitions (e.g. {@code 0-5, 7, 10-15}.
+	 * @return the partitions within the topic. Property place holders and SpEL
+	 * expressions are supported, which must resolve to Integers (or Strings that can be
+	 * parsed as Integers).
 	 */
 	String[] partitions() default {};
 
 	/**
-	 * The partitions with initial offsets within the topic.
+	 * The partitions with initial offsets within the topic. There must only be one
+	 * instance of {@link PartitionOffset} if its 'partition' property is '*'.
 	 * Partitions specified here can't be duplicated in the {@link #partitions()}.
 	 * @return the {@link PartitionOffset} array.
 	 */

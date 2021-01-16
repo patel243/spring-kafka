@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
@@ -48,6 +49,12 @@ class FailedRecordTracker {
 
 	private final BackOff backOff;
 
+	private BiFunction<ConsumerRecord<?, ?>, Exception, BackOff> backOffFunction;
+
+	private boolean resetStateOnRecoveryFailure = true;
+
+	private boolean resetStateOnExceptionChange;
+
 	FailedRecordTracker(@Nullable BiConsumer<ConsumerRecord<?, ?>, Exception> recoverer, BackOff backOff,
 			LogAccessor logger) {
 
@@ -63,7 +70,7 @@ class FailedRecordTracker {
 					+ (failedRecord == null
 						? "none"
 						: failedRecord.getBackOffExecution())
-					+ " exhausted for " + rec);
+					+ " exhausted for " + ListenerUtils.recordToString(rec));
 			};
 		}
 		else {
@@ -73,9 +80,43 @@ class FailedRecordTracker {
 		this.backOff = backOff;
 	}
 
+	/**
+	 * Set a function to dynamically determine the {@link BackOff} to use, based on the
+	 * consumer record and/or exception. If null is returned, the default BackOff will be
+	 * used.
+	 * @param backOffFunction the function.
+	 * @since 2.6
+	 */
+	public void setBackOffFunction(BiFunction<ConsumerRecord<?, ?>, Exception, BackOff> backOffFunction) {
+		this.backOffFunction = backOffFunction;
+	}
+
+	/**
+	 * Set to false to immediately attempt to recover on the next attempt instead
+	 * of repeating the BackOff cycle when recovery fails.
+	 * @param resetStateOnRecoveryFailure false to retain state.
+	 * @since 2.5.5
+	 */
+	public void setResetStateOnRecoveryFailure(boolean resetStateOnRecoveryFailure) {
+		this.resetStateOnRecoveryFailure = resetStateOnRecoveryFailure;
+	}
+
+	/**
+	 * Set to true to reset the retry {@link BackOff} if the exception is a different type
+	 * to the previous failure for the same record. The
+	 * {@link #setBackOffFunction(BiFunction) backOffFunction}, if provided, will be
+	 * called to get the {@link BackOff} to use for the new exception; otherwise, the
+	 * configured {@link BackOff} will be used.
+	 * @param resetStateOnExceptionChange true to reset.
+	 * @since 2.6.3
+	 */
+	public void setResetStateOnExceptionChange(boolean resetStateOnExceptionChange) {
+		this.resetStateOnExceptionChange = resetStateOnExceptionChange;
+	}
+
 	boolean skip(ConsumerRecord<?, ?> record, Exception exception) {
 		if (this.noRetries) {
-			this.recoverer.accept(record, exception);
+			attemptRecovery(record, exception, null);
 			return true;
 		}
 		Map<TopicPartition, FailedRecord> map = this.failures.get();
@@ -84,14 +125,7 @@ class FailedRecordTracker {
 			map = this.failures.get();
 		}
 		TopicPartition topicPartition = new TopicPartition(record.topic(), record.partition());
-		FailedRecord failedRecord = map.get(topicPartition);
-		if (failedRecord == null || failedRecord.getOffset() != record.offset()) {
-			failedRecord = new FailedRecord(record.offset(), this.backOff.start());
-			map.put(topicPartition, failedRecord);
-		}
-		else {
-			failedRecord.getDeliveryAttempts().incrementAndGet();
-		}
+		FailedRecord failedRecord = getFailedRecordInstance(record, exception, map, topicPartition);
 		long nextBackOff = failedRecord.getBackOffExecution().nextBackOff();
 		if (nextBackOff != BackOffExecution.STOP) {
 			try {
@@ -103,12 +137,56 @@ class FailedRecordTracker {
 			return false;
 		}
 		else {
-			this.recoverer.accept(record, exception);
+			attemptRecovery(record, exception, topicPartition);
 			map.remove(topicPartition);
 			if (map.isEmpty()) {
 				this.failures.remove();
 			}
 			return true;
+		}
+	}
+
+	private FailedRecord getFailedRecordInstance(ConsumerRecord<?, ?> record, Exception exception,
+			Map<TopicPartition, FailedRecord> map, TopicPartition topicPartition) {
+
+		Exception realException = exception;
+		if (realException  instanceof ListenerExecutionFailedException
+				&& realException.getCause() instanceof Exception) {
+
+			realException = (Exception) realException.getCause();
+		}
+		FailedRecord failedRecord = map.get(topicPartition);
+		if (failedRecord == null || failedRecord.getOffset() != record.offset()
+				|| (this.resetStateOnExceptionChange
+						&& !realException.getClass().isInstance(failedRecord.getLastException()))) {
+
+			failedRecord = new FailedRecord(record.offset(), determineBackOff(record, realException).start());
+			map.put(topicPartition, failedRecord);
+		}
+		else {
+			failedRecord.getDeliveryAttempts().incrementAndGet();
+		}
+		failedRecord.setLastException(realException);
+		return failedRecord;
+	}
+
+	private BackOff determineBackOff(ConsumerRecord<?, ?> record, Exception exception) {
+		if (this.backOffFunction == null) {
+			return this.backOff;
+		}
+		BackOff backOffToUse = this.backOffFunction.apply(record, exception);
+		return backOffToUse != null ? backOffToUse : this.backOff;
+	}
+
+	private void attemptRecovery(ConsumerRecord<?, ?> record, Exception exception, @Nullable TopicPartition tp) {
+		try {
+			this.recoverer.accept(record, exception);
+		}
+		catch (RuntimeException e) {
+			if (tp != null && this.resetStateOnRecoveryFailure) {
+				this.failures.get().remove(tp);
+			}
+			throw e;
 		}
 	}
 
@@ -146,6 +224,8 @@ class FailedRecordTracker {
 
 		private final AtomicInteger deliveryAttempts = new AtomicInteger(1);
 
+		private Exception lastException;
+
 		FailedRecord(long offset, BackOffExecution backOffExecution) {
 			this.offset = offset;
 			this.backOffExecution = backOffExecution;
@@ -161,6 +241,14 @@ class FailedRecordTracker {
 
 		AtomicInteger getDeliveryAttempts() {
 			return this.deliveryAttempts;
+		}
+
+		Exception getLastException() {
+			return this.lastException;
+		}
+
+		void setLastException(Exception lastException) {
+			this.lastException = lastException;
 		}
 
 	}

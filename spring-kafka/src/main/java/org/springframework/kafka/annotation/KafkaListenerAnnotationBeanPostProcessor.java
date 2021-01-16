@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.commons.logging.LogFactory;
 
@@ -74,6 +76,7 @@ import org.springframework.kafka.config.MultiMethodKafkaListenerEndpoint;
 import org.springframework.kafka.listener.KafkaListenerErrorHandler;
 import org.springframework.kafka.support.KafkaNull;
 import org.springframework.kafka.support.TopicPartitionOffset;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.converter.GenericMessageConverter;
 import org.springframework.messaging.converter.MessageConverter;
@@ -193,6 +196,15 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 	 */
 	public void setMessageHandlerMethodFactory(MessageHandlerMethodFactory messageHandlerMethodFactory) {
 		this.messageHandlerMethodFactory.setHandlerMethodFactory(messageHandlerMethodFactory);
+	}
+
+	/**
+	 * Return the configured handler factory.
+	 * @return the factory.
+	 * @since 2.5.7
+	 */
+	public MessageHandlerMethodFactory getMessageHandlerMethodFactory() {
+		return this.messageHandlerMethodFactory;
 	}
 
 	/**
@@ -437,29 +449,73 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 		resolveKafkaProperties(endpoint, kafkaListener.properties());
 		endpoint.setSplitIterables(kafkaListener.splitIterables());
 
-		KafkaListenerContainerFactory<?> factory = null;
-		String containerFactoryBeanName = resolve(kafkaListener.containerFactory());
-		if (StringUtils.hasText(containerFactoryBeanName)) {
-			Assert.state(this.beanFactory != null, "BeanFactory must be set to obtain container factory by bean name");
-			try {
-				factory = this.beanFactory.getBean(containerFactoryBeanName, KafkaListenerContainerFactory.class);
-			}
-			catch (NoSuchBeanDefinitionException ex) {
-				throw new BeanInitializationException("Could not register Kafka listener endpoint on [" + adminTarget
-						+ "] for bean " + beanName + ", no " + KafkaListenerContainerFactory.class.getSimpleName()
-						+ " with id '" + containerFactoryBeanName + "' was found in the application context", ex);
-			}
+		String containerFactory = resolve(kafkaListener.containerFactory());
+		if (StringUtils.hasText(containerFactory)) {
+			this.registrar.registerEndpoint(endpoint, resolveContainerFactory(kafkaListener, containerFactory, beanName));
+		}
+		else {
+			this.registrar.registerEndpoint(endpoint);
 		}
 
 		endpoint.setBeanFactory(this.beanFactory);
 		String errorHandlerBeanName = resolveExpressionAsString(kafkaListener.errorHandler(), "errorHandler");
 		if (StringUtils.hasText(errorHandlerBeanName)) {
-			endpoint.setErrorHandler(this.beanFactory.getBean(errorHandlerBeanName, KafkaListenerErrorHandler.class));
+			resolveErrorHandler(endpoint, kafkaListener);
 		}
-		this.registrar.registerEndpoint(endpoint, factory);
 		if (StringUtils.hasText(beanRef)) {
 			this.listenerScope.removeListener(beanRef);
 		}
+	}
+
+	private void resolveErrorHandler(MethodKafkaListenerEndpoint<?, ?> endpoint, KafkaListener kafkaListener) {
+		Object errorHandler = resolveExpression(kafkaListener.errorHandler());
+		if (errorHandler instanceof KafkaListenerErrorHandler) {
+			endpoint.setErrorHandler((KafkaListenerErrorHandler) errorHandler);
+		}
+		else {
+			String errorHandlerBeanName = resolveExpressionAsString(kafkaListener.errorHandler(), "errorHandler");
+			if (StringUtils.hasText(errorHandlerBeanName)) {
+				endpoint.setErrorHandler(
+						this.beanFactory.getBean(errorHandlerBeanName, KafkaListenerErrorHandler.class));
+			}
+		}
+	}
+
+	@Nullable
+	private KafkaListenerContainerFactory<?> resolveContainerFactory(KafkaListener kafkaListener,
+			Object factoryTarget, String beanName) {
+
+		KafkaListenerContainerFactory<?> factory = null;
+		Object resolved = resolveExpression(kafkaListener.containerFactory());
+		if (resolved instanceof KafkaListenerContainerFactory) {
+			return (KafkaListenerContainerFactory<?>) resolved;
+		}
+		String containerFactoryBeanName = resolveExpressionAsString(kafkaListener.containerFactory(),
+				"containerFactory");
+		if (StringUtils.hasText(containerFactoryBeanName)) {
+			assertBeanFactory();
+			try {
+				factory = this.beanFactory.getBean(containerFactoryBeanName, KafkaListenerContainerFactory.class);
+			}
+			catch (NoSuchBeanDefinitionException ex) {
+				throw new BeanInitializationException(
+						noBeanFoundMessage(factoryTarget, beanName, containerFactoryBeanName,
+								KafkaListenerContainerFactory.class), ex);
+			}
+		}
+		return factory;
+	}
+
+	protected void assertBeanFactory() {
+		Assert.state(this.beanFactory != null, "BeanFactory must be set to obtain container factory by bean name");
+	}
+
+	protected String noBeanFoundMessage(Object target, String listenerBeanName, String requestedBeanName,
+			Class<?> expectedClass) {
+
+		return "Could not register Kafka listener endpoint on ["
+				+ target + "] for bean " + listenerBeanName + ", no '" + expectedClass.getSimpleName() + "' with id '"
+				+ requestedBeanName + "' was found in the application context";
 	}
 
 	private void resolveKafkaProperties(MethodKafkaListenerEndpoint<?, ?> endpoint, String[] propertyStrings) {
@@ -553,44 +609,24 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 				() -> "At least one 'partition' or 'partitionOffset' required in @TopicPartition for topic '" + topic + "'");
 		List<TopicPartitionOffset> result = new ArrayList<>();
 		for (String partition : partitions) {
-			resolvePartitionAsInteger((String) topic, resolveExpression(partition), result);
+			resolvePartitionAsInteger((String) topic, resolveExpression(partition), result, null, false, false);
 		}
-
-		for (PartitionOffset partitionOffset : partitionOffsets) {
-			TopicPartitionOffset topicPartitionOffset =
-					new TopicPartitionOffset((String) topic,
-							resolvePartition(topic, partitionOffset),
-							resolveInitialOffset(topic, partitionOffset),
-							isRelative(topic, partitionOffset));
-			if (!result.contains(topicPartitionOffset)) {
-				result.add(topicPartitionOffset);
-			}
-			else {
-				throw new IllegalArgumentException(
-						String.format("@TopicPartition can't have the same partition configuration twice: [%s]",
-								topicPartitionOffset));
-			}
-		}
-		return result;
-	}
-
-	private Integer resolvePartition(Object topic, PartitionOffset partitionOffset) {
-		Object partitionValue = resolveExpression(partitionOffset.partition());
-		Integer partition;
-		if (partitionValue instanceof String) {
-			Assert.state(StringUtils.hasText((String) partitionValue),
-					() -> "partition in @PartitionOffset for topic '" + topic + "' cannot be empty");
-			partition = Integer.valueOf((String) partitionValue);
-		}
-		else if (partitionValue instanceof Integer) {
-			partition = (Integer) partitionValue;
+		if (partitionOffsets.length == 1 && partitionOffsets[0].partition().equals("*")) {
+			result.forEach(tpo -> {
+				tpo.setOffset(resolveInitialOffset(tpo.getTopic(), partitionOffsets[0]));
+				tpo.setRelativeToCurrent(isRelative(tpo.getTopic(), partitionOffsets[0]));
+			});
 		}
 		else {
-			throw new IllegalArgumentException(String.format(
-					"@PartitionOffset for topic '%s' can't resolve '%s' as an Integer or String, resolved to '%s'",
-					topic, partitionOffset.partition(), partitionValue.getClass()));
+			for (PartitionOffset partitionOffset : partitionOffsets) {
+				Assert.isTrue(!partitionOffset.partition().equals("*"), () ->
+						"Partition wildcard '*' is only allowed in a single @PartitionOffset in " + result);
+				resolvePartitionAsInteger((String) topic, resolveExpression(partitionOffset.partition()), result,
+						resolveInitialOffset(topic, partitionOffset), isRelative(topic, partitionOffset), true);
+			}
 		}
-		return partition;
+		Assert.isTrue(result.size() > 0, () -> "At least one partition required for " + topic);
+		return result;
 	}
 
 	private Long resolveInitialOffset(Object topic, PartitionOffset partitionOffset) {
@@ -652,16 +688,27 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 
 	@SuppressWarnings("unchecked")
 	private void resolvePartitionAsInteger(String topic, Object resolvedValue,
-			List<TopicPartitionOffset> result) {
+			List<TopicPartitionOffset> result, @Nullable Long offset, boolean isRelative, boolean checkDups) {
+
 		if (resolvedValue instanceof String[]) {
 			for (Object object : (String[]) resolvedValue) {
-				resolvePartitionAsInteger(topic, object, result);
+				resolvePartitionAsInteger(topic, object, result, offset, isRelative, checkDups);
 			}
 		}
 		else if (resolvedValue instanceof String) {
 			Assert.state(StringUtils.hasText((String) resolvedValue),
 					() -> "partition in @TopicPartition for topic '" + topic + "' cannot be empty");
-			result.add(new TopicPartitionOffset(topic, Integer.valueOf((String) resolvedValue)));
+			List<TopicPartitionOffset> collected = parsePartitions((String) resolvedValue)
+					.map(part -> new TopicPartitionOffset(topic, part, offset, isRelative))
+					.collect(Collectors.toList());
+			if (checkDups) {
+				collected.forEach(tpo -> {
+					Assert.state(!result.contains(tpo), () ->
+							String.format("@TopicPartition can't have the same partition configuration twice: [%s]",
+									tpo));
+				});
+			}
+			result.addAll(collected);
 		}
 		else if (resolvedValue instanceof Integer[]) {
 			for (Integer partition : (Integer[]) resolvedValue) {
@@ -673,7 +720,7 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 		}
 		else if (resolvedValue instanceof Iterable) {
 			for (Object object : (Iterable<Object>) resolvedValue) {
-				resolvePartitionAsInteger(topic, object, result);
+				resolvePartitionAsInteger(topic, object, result, offset, isRelative, checkDups);
 			}
 		}
 		else {
@@ -766,6 +813,38 @@ public class KafkaListenerAnnotationBeanPostProcessor<K, V>
 		else {
 			return Collections.emptySet();
 		}
+	}
+
+	/**
+	 * Parse a list of partitions into a {@link List}. Example: "0-5,10-15".
+	 * @param partsString the comma-delimited list of partitions/ranges.
+	 * @return the stream of partition numbers, sorted and de-duplicated.
+	 * @since 2.6.4
+	 */
+	private Stream<Integer> parsePartitions(String partsString) {
+		String[] partsStrings = partsString.split(",");
+		if (partsStrings.length == 1 && !partsStrings[0].contains("-")) {
+			return Stream.of(Integer.parseInt(partsStrings[0].trim()));
+		}
+		List<Integer> parts = new ArrayList<>();
+		for (String part : partsStrings) {
+			if (part.contains("-")) {
+				String[] startEnd = part.split("-");
+				Assert.state(startEnd.length == 2, "Only one hyphen allowed for a range of partitions: " + part);
+				int start = Integer.parseInt(startEnd[0].trim());
+				int end = Integer.parseInt(startEnd[1].trim());
+				Assert.state(end >= start, "Invalid range: " + part);
+				for (int i = start; i <= end; i++) {
+					parts.add(i);
+				}
+			}
+			else {
+				parsePartitions(part).forEach(p -> parts.add(p));
+			}
+		}
+		return parts.stream()
+				.sorted()
+				.distinct();
 	}
 
 	/**

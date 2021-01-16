@@ -18,11 +18,13 @@ package org.springframework.kafka.core;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import org.aopalliance.aop.Advice;
@@ -77,6 +79,8 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 	private final Map<String, Object> configs;
 
 	private final List<Listener<K, V>> listeners = new ArrayList<>();
+
+	private final List<ConsumerPostProcessor<K, V>> postProcessors = new ArrayList<>();
 
 	private Supplier<Deserializer<K>> keyDeserializerSupplier;
 
@@ -165,8 +169,14 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 	 * @return the listeners.
 	 * @since 2.5
 	 */
+	@Override
 	public List<Listener<K, V>> getListeners() {
 		return Collections.unmodifiableList(this.listeners);
+	}
+
+	@Override
+	public List<ConsumerPostProcessor<K, V>> getPostProcessors() {
+		return Collections.unmodifiableList(this.postProcessors);
 	}
 
 	/**
@@ -174,6 +184,7 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 	 * @param listener the listener.
 	 * @since 2.5
 	 */
+	@Override
 	public void addListener(Listener<K, V> listener) {
 		Assert.notNull(listener, "'listener' cannot be null");
 		this.listeners.add(listener);
@@ -185,6 +196,7 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 	 * @param listener the listener.
 	 * @since 2.5
 	 */
+	@Override
 	public void addListener(int index, Listener<K, V> listener) {
 		Assert.notNull(listener, "'listener' cannot be null");
 		if (index >= this.listeners.size()) {
@@ -195,12 +207,24 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 		}
 	}
 
+	@Override
+	public void addPostProcessor(ConsumerPostProcessor<K, V> postProcessor) {
+		Assert.notNull(postProcessor, "'postProcessor' cannot be null");
+		this.postProcessors.add(postProcessor);
+	}
+
+	@Override
+	public boolean removePostProcessor(ConsumerPostProcessor<K, V> postProcessor) {
+		return this.postProcessors.remove(postProcessor);
+	}
+
 	/**
 	 * Remove a listener.
 	 * @param listener the listener.
 	 * @return true if removed.
 	 * @since 2.5
 	 */
+	@Override
 	public boolean removeListener(Listener<K, V> listener) {
 		return this.listeners.remove(listener);
 	}
@@ -217,13 +241,6 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 			@Nullable final String clientIdSuffixArg, @Nullable Properties properties) {
 
 		return createKafkaConsumer(groupId, clientIdPrefix, clientIdSuffixArg, properties);
-	}
-
-	@Deprecated
-	protected Consumer<K, V> createKafkaConsumer(@Nullable String groupId, @Nullable String clientIdPrefix,
-			@Nullable String clientIdSuffixArg) {
-
-		return createKafkaConsumer(groupId, clientIdPrefix, clientIdSuffixArg, null);
 	}
 
 	protected Consumer<K, V> createKafkaConsumer(@Nullable String groupId, @Nullable String clientIdPrefix,
@@ -261,23 +278,39 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 							: modifiedConfigs.get(ConsumerConfig.CLIENT_ID_CONFIG)) + clientIdSuffix);
 		}
 		if (properties != null) {
-			checkForUnsupportedProps(properties);
-			properties.stringPropertyNames()
+			Set<String> stringPropertyNames = properties.stringPropertyNames();  // to get any nested default Properties
+			stringPropertyNames
 					.stream()
 					.filter(name -> !name.equals(ConsumerConfig.CLIENT_ID_CONFIG)
 							&& !name.equals(ConsumerConfig.GROUP_ID_CONFIG))
 					.forEach(name -> modifiedConfigs.put(name, properties.getProperty(name)));
+			properties.entrySet().stream()
+					.filter(entry -> !entry.getKey().equals(ConsumerConfig.CLIENT_ID_CONFIG)
+							&& !entry.getKey().equals(ConsumerConfig.GROUP_ID_CONFIG)
+							&& !stringPropertyNames.contains(entry.getKey())
+							&& entry.getKey() instanceof String)
+					.forEach(entry -> modifiedConfigs.put((String) entry.getKey(), entry.getValue()));
+			checkInaccessible(properties, modifiedConfigs);
 		}
 		return createKafkaConsumer(modifiedConfigs);
 	}
 
-	private void checkForUnsupportedProps(Properties properties) {
-		properties.forEach((key, value) -> {
-			if (!(key instanceof String) || !(value instanceof String)) {
-				LOGGER.warn(() -> "Property override for '" + key.toString()
-					+ "' ignored, only <String, String> properties are supported; value is a(n) " + value.getClass());
+	private void checkInaccessible(Properties properties, Map<String, Object> modifiedConfigs) {
+		List<Object> inaccessible = null;
+		for (Enumeration<?> propertyNames = properties.propertyNames(); propertyNames.hasMoreElements(); ) {
+			Object nextElement = propertyNames.nextElement();
+			if (!modifiedConfigs.containsKey(nextElement)) {
+				if (inaccessible == null) {
+					inaccessible = new ArrayList<>();
+				}
+				inaccessible.add(nextElement);
 			}
-		});
+		}
+		if (inaccessible != null) {
+			LOGGER.error("Non-String-valued default properties are inaccessible; use String values or "
+					+ "make them explicit properties instead of defaults: "
+					+ inaccessible);
+		}
 	}
 
 	@SuppressWarnings("resource")
@@ -300,6 +333,9 @@ public class DefaultKafkaConsumerFactory<K, V> extends KafkaResourceFactory
 			for (Listener<K, V> listener : this.listeners) {
 				listener.consumerAdded(id, kafkaConsumer);
 			}
+		}
+		for (ConsumerPostProcessor<K, V> pp : this.postProcessors) {
+			pp.apply(kafkaConsumer);
 		}
 		return kafkaConsumer;
 	}

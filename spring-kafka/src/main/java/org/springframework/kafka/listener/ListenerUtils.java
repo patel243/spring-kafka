@@ -29,6 +29,8 @@ import org.springframework.core.log.LogAccessor;
 import org.springframework.kafka.support.serializer.DeserializationException;
 import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
+import org.springframework.util.backoff.BackOff;
+import org.springframework.util.backoff.BackOffExecution;
 
 /**
  * Listener utilities.
@@ -41,6 +43,8 @@ public final class ListenerUtils {
 
 	private ListenerUtils() {
 	}
+
+	private static final ThreadLocal<Boolean> LOG_METADATA_ONLY = new ThreadLocal<>();
 
 	public static ListenerType determineListenerType(Object listener) {
 		Assert.notNull(listener, "Listener cannot be null");
@@ -96,4 +100,85 @@ public final class ListenerUtils {
 		return null;
 	}
 
+	/**
+	 * Set to true to only log record metadata.
+	 * @param onlyMeta true to only log record metadata.
+	 * @since 2.2.14
+	 * @see #recordToString(ConsumerRecord)
+	 */
+	public static void setLogOnlyMetadata(boolean onlyMeta) {
+		LOG_METADATA_ONLY.set(onlyMeta);
+	}
+
+	/**
+	 * Return the {@link ConsumerRecord} as a String; either {@code toString()} or
+	 * {@code topic-partition@offset}.
+	 * @param record the record.
+	 * @return the rendered record.
+	 * @since 2.2.14
+	 * @see #setLogOnlyMetadata(boolean)
+	 */
+	public static String recordToString(ConsumerRecord<?, ?> record) {
+		if (Boolean.TRUE.equals(LOG_METADATA_ONLY.get())) {
+			return record.topic() + "-" + record.partition() + "@" + record.offset();
+		}
+		else {
+			return record.toString();
+		}
+	}
+
+	/**
+	 * Return the {@link ConsumerRecord} as a String; either {@code toString()} or
+	 * {@code topic-partition@offset}.
+	 * @param record the record.
+	 * @param meta true to log just the metadata.
+	 * @return the rendered record.
+	 * @since 2.5.4
+	 */
+	public static String recordToString(ConsumerRecord<?, ?> record, boolean meta) {
+		if (meta) {
+			return record.topic() + "-" + record.partition() + "@" + record.offset();
+		}
+		else {
+			return record.toString();
+		}
+	}
+
+	/**
+	 * Sleep according to the {@link BackOff}; when the {@link BackOffExecution} returns
+	 * {@link BackOffExecution#STOP} sleep for the previous backOff.
+	 * @param backOff the {@link BackOff} to create a new {@link BackOffExecution}.
+	 * @param executions a thread local containing the {@link BackOffExecution} for this
+	 * thread.
+	 * @param lastIntervals a thread local containing the previous {@link BackOff}
+	 * interval for this thread.
+	 * @since 2.3.12
+	 */
+	public static void unrecoverableBackOff(BackOff backOff, ThreadLocal<BackOffExecution> executions,
+			ThreadLocal<Long> lastIntervals) {
+
+		BackOffExecution backOffExecution = executions.get();
+		if (backOffExecution == null) {
+			backOffExecution = backOff.start();
+			executions.set(backOffExecution);
+		}
+		Long interval = backOffExecution.nextBackOff();
+		if (interval == BackOffExecution.STOP) {
+			interval = lastIntervals.get();
+			if (interval == null) {
+				interval = Long.valueOf(0);
+			}
+		}
+		lastIntervals.set(interval);
+		if (interval > 0) {
+			try {
+				Thread.sleep(interval);
+			}
+			catch (@SuppressWarnings("unused") InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
 }
+

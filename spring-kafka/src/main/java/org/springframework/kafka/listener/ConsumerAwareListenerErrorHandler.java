@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 the original author or authors.
+ * Copyright 2017-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,9 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.springframework.messaging.Message;
 
 /**
- * An error handler that has access to the consumer, for example to adjust
- * offsets after an error.
+ * An error handler that has access to the consumer. IMPORTANT: do not perform seek
+ * operations on the consumer, the container won't be aware. Use a container-level error
+ * handler such as the {@link SeekToCurrentErrorHandler} for such situations.
  *
  * @author Gary Russell
  * @since 2.0

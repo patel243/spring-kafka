@@ -90,11 +90,11 @@ import org.springframework.messaging.handler.annotation.MessageMapping;
 public @interface KafkaListener {
 
 	/**
-	 * The unique identifier of the container managing for this endpoint.
-	 * <p>If none is specified an auto-generated one is provided.
+	 * The unique identifier of the container for this listener.
+	 * <p>If none is specified an auto-generated id is used.
 	 * <p>Note: When provided, this value will override the group id property
 	 * in the consumer factory configuration, unless {@link #idIsGroup()}
-	 * is set to false.
+	 * is set to false or {@link #groupId()} is provided.
 	 * <p>SpEL {@code #{...}} and property place holders {@code ${...}} are supported.
 	 * @return the {@code id} for the container managing for this endpoint.
 	 * @see org.springframework.kafka.config.KafkaListenerEndpointRegistry#getListenerContainer(String)
@@ -104,7 +104,10 @@ public @interface KafkaListener {
 	/**
 	 * The bean name of the {@link org.springframework.kafka.config.KafkaListenerContainerFactory}
 	 * to use to create the message listener container responsible to serve this endpoint.
-	 * <p>If not specified, the default container factory is used, if any.
+	 * <p>
+	 * If not specified, the default container factory is used, if any. If a SpEL
+	 * expression is provided ({@code #{...}}), the expression can either evaluate to a
+	 * container factory instance or a bean name.
 	 * @return the container factory bean name.
 	 */
 	String containerFactory() default "";
@@ -156,7 +159,10 @@ public @interface KafkaListener {
 
 	/**
 	 * Set an {@link org.springframework.kafka.listener.KafkaListenerErrorHandler} bean
-	 * name to invoke if the listener method throws an exception.
+	 * name to invoke if the listener method throws an exception. If a SpEL expression is
+	 * provided ({@code #{...}}), the expression can either evaluate to a
+	 * {@link org.springframework.kafka.listener.KafkaListenerErrorHandler} instance or a
+	 * bean name.
 	 * @return the error handler.
 	 * @since 1.3
 	 */
@@ -226,7 +232,8 @@ public @interface KafkaListener {
 	/**
 	 * Kafka consumer properties; they will supersede any properties with the same name
 	 * defined in the consumer factory (if the consumer factory supports property overrides).
-	 * <h3>Supported Syntax</h3>
+	 * <p>
+	 * <b>Supported Syntax</b>
 	 * <p>The supported syntax for key-value pairs is the same as the
 	 * syntax defined for entries in a Java
 	 * {@linkplain java.util.Properties#load(java.io.Reader) properties file}:
@@ -245,9 +252,9 @@ public @interface KafkaListener {
 	String[] properties() default {};
 
 	/**
-	 * When false and the return type is a {@link Iterable} return the result as the value
-	 * of a single reply record instead of individual records for each element. Default
-	 * true. Ignored if the reply is of type {@code Iterable<Message<?>>}.
+	 * When false and the return type is an {@link Iterable} return the result as the
+	 * value of a single reply record instead of individual records for each element.
+	 * Default true. Ignored if the reply is of type {@code Iterable<Message<?>>}.
 	 * @return false to create a single reply record.
 	 * @since 2.3.5
 	 */

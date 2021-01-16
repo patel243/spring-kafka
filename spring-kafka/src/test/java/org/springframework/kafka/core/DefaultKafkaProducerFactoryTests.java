@@ -18,6 +18,7 @@ package org.springframework.kafka.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.BDDMockito.given;
@@ -25,6 +26,7 @@ import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import java.time.Duration;
@@ -122,9 +124,9 @@ public class DefaultKafkaProducerFactoryTests {
 
 	@Test
 	@SuppressWarnings({ "rawtypes", "unchecked" })
-	void testResetSingle() {
+	void testResetSingle() throws InterruptedException {
 		final Producer producer = mock(Producer.class);
-		ProducerFactory pf = new DefaultKafkaProducerFactory(new HashMap<>()) {
+		DefaultKafkaProducerFactory pf = new DefaultKafkaProducerFactory(new HashMap<>()) {
 
 			@Override
 			protected Producer createRawProducer(Map configs) {
@@ -134,13 +136,19 @@ public class DefaultKafkaProducerFactoryTests {
 		};
 		Producer aProducer = pf.createProducer();
 		assertThat(aProducer).isNotNull();
+		Producer bProducer = pf.createProducer();
+		assertThat(bProducer).isSameAs(aProducer);
 		aProducer.close(ProducerFactoryUtils.DEFAULT_CLOSE_TIMEOUT);
 		assertThat(KafkaTestUtils.getPropertyValue(pf, "producer")).isNotNull();
+		pf.setMaxAge(Duration.ofMillis(10));
+		Thread.sleep(50);
+		aProducer = pf.createProducer();
+		assertThat(aProducer).isNotSameAs(bProducer);
 		Map<?, ?> cache = KafkaTestUtils.getPropertyValue(pf, "cache", Map.class);
 		assertThat(cache.size()).isEqualTo(0);
 		pf.reset();
 		assertThat(KafkaTestUtils.getPropertyValue(pf, "producer")).isNull();
-		verify(producer).close(any(Duration.class));
+		verify(producer, times(2)).close(any(Duration.class));
 	}
 
 	@Test
@@ -161,11 +169,18 @@ public class DefaultKafkaProducerFactoryTests {
 		Producer aProducer = pf.createProducer();
 		assertThat(aProducer).isNotNull();
 		aProducer.close();
+		Producer bProducer = pf.createProducer();
+		assertThat(bProducer).isSameAs(aProducer);
+		bProducer.close();
 		assertThat(KafkaTestUtils.getPropertyValue(pf, "producer")).isNull();
 		Map<?, ?> cache = KafkaTestUtils.getPropertyValue(pf, "cache", Map.class);
 		assertThat(cache.size()).isEqualTo(1);
 		Queue queue = (Queue) cache.get("foo");
 		assertThat(queue.size()).isEqualTo(1);
+		pf.setMaxAge(Duration.ofMillis(10));
+		Thread.sleep(50);
+		aProducer = pf.createProducer();
+		assertThat(aProducer).isNotSameAs(bProducer);
 		pf.onApplicationEvent(new ContextStoppedEvent(ctx));
 		assertThat(queue.size()).isEqualTo(0);
 		verify(producer).close(any(Duration.class));
@@ -173,16 +188,50 @@ public class DefaultKafkaProducerFactoryTests {
 
 	@Test
 	@SuppressWarnings({ "rawtypes", "unchecked" })
-	void testThreadLocal() {
+	void dontReturnToCacheAfterReset() {
 		final Producer producer = mock(Producer.class);
+		ApplicationContext ctx = mock(ApplicationContext.class);
 		DefaultKafkaProducerFactory pf = new DefaultKafkaProducerFactory(new HashMap<>()) {
 
-			boolean created;
+			@Override
+			protected Producer createRawProducer(Map configs) {
+				return producer;
+			}
+
+		};
+		pf.setApplicationContext(ctx);
+		pf.setTransactionIdPrefix("foo");
+		Producer aProducer = pf.createProducer();
+		assertThat(aProducer).isNotNull();
+		aProducer.close();
+		Producer bProducer = pf.createProducer();
+		assertThat(bProducer).isSameAs(aProducer);
+		bProducer.close();
+		assertThat(KafkaTestUtils.getPropertyValue(pf, "producer")).isNull();
+		Map<?, ?> cache = KafkaTestUtils.getPropertyValue(pf, "cache", Map.class);
+		assertThat(cache.size()).isEqualTo(1);
+		Queue queue = (Queue) cache.get("foo");
+		assertThat(queue.size()).isEqualTo(1);
+		bProducer = pf.createProducer();
+		assertThat(bProducer).isSameAs(aProducer);
+		assertThat(queue.size()).isEqualTo(0);
+		pf.reset();
+		bProducer.close();
+		assertThat(queue.size()).isEqualTo(0);
+		pf.destroy();
+	}
+
+	@Test
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	void testThreadLocal() throws InterruptedException {
+		final Producer producer = mock(Producer.class);
+		AtomicBoolean created = new AtomicBoolean();
+		DefaultKafkaProducerFactory pf = new DefaultKafkaProducerFactory(new HashMap<>()) {
 
 			@Override
 			protected Producer createKafkaProducer() {
-				assertThat(this.created).isFalse();
-				this.created = true;
+				assertThat(created.get()).isFalse();
+				created.set(true);
 				return producer;
 			}
 
@@ -196,9 +245,14 @@ public class DefaultKafkaProducerFactoryTests {
 		bProducer.close();
 		assertThat(KafkaTestUtils.getPropertyValue(pf, "producer")).isNull();
 		assertThat(KafkaTestUtils.getPropertyValue(pf, "threadBoundProducers", ThreadLocal.class).get()).isNotNull();
+		pf.setMaxAge(Duration.ofMillis(10));
+		Thread.sleep(50);
+		created.set(false);
+		aProducer = pf.createProducer();
+		assertThat(aProducer).isNotSameAs(bProducer);
 		pf.closeThreadBoundProducer();
 		assertThat(KafkaTestUtils.getPropertyValue(pf, "threadBoundProducers", ThreadLocal.class).get()).isNull();
-		verify(producer).close(any(Duration.class));
+		verify(producer, times(3)).close(any(Duration.class));
 	}
 
 	@Test
@@ -393,6 +447,35 @@ public class DefaultKafkaProducerFactoryTests {
 		aProducer = pf.createProducer();
 		assertThat(configPassedToKafkaConsumer.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG)).isEqualTo("bar");
 		pf.destroy();
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	@Test
+	void configUpdates() {
+		Map<String, Object> configs = new HashMap<>();
+		configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+		DefaultKafkaProducerFactory pf = new DefaultKafkaProducerFactory<>(configs);
+		assertThat(pf.getConfigurationProperties()).hasSize(2);
+		configs.remove(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG);
+		configs.put(ProducerConfig.ACKS_CONFIG, "all");
+		pf.updateConfigs(configs);
+		assertThat(pf.getConfigurationProperties()).hasSize(3);
+		pf.removeConfig(ProducerConfig.ACKS_CONFIG);
+		assertThat(pf.getConfigurationProperties()).hasSize(2);
+		configs.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "tx-");
+		assertThatIllegalArgumentException().isThrownBy(() -> pf.updateConfigs(configs));
+		configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+		configs.put(ProducerConfig.CLIENT_ID_CONFIG, "clientId");
+		DefaultKafkaProducerFactory pf1 = new DefaultKafkaProducerFactory<>(configs);
+		assertThat(pf1.getConfigurationProperties()).hasSize(5);
+		configs.put(ProducerConfig.CLIENT_ID_CONFIG, "clientId2");
+		configs.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "tx2-");
+		pf1.updateConfigs(configs);
+		assertThat(pf1.getConfigurationProperties()).hasSize(5);
+		assertThat(KafkaTestUtils.getPropertyValue(pf1, "clientIdPrefix")).isEqualTo("clientId2");
+		assertThat(KafkaTestUtils.getPropertyValue(pf1, "transactionIdPrefix")).isEqualTo("tx2-");
+		configs.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, null);
+		assertThatIllegalArgumentException().isThrownBy(() -> pf1.updateConfigs(configs));
 	}
 
 }

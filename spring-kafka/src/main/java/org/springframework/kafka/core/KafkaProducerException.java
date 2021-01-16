@@ -44,16 +44,6 @@ public class KafkaProducerException extends KafkaException {
 
 	/**
 	 * Return the failed producer record.
-	 * @return the record.
-	 * @deprecated in favor of {@link #getFailedProducerRecord()}
-	 */
-	@Deprecated
-	public ProducerRecord<?, ?> getProducerRecord() {
-		return this.producerRecord;
-	}
-
-	/**
-	 * Return the failed producer record.
 	 * @param <K> the key type.
 	 * @param <V> the value type.
 	 * @return the record.
@@ -61,7 +51,7 @@ public class KafkaProducerException extends KafkaException {
 	 */
 	@SuppressWarnings("unchecked")
 	public <K, V> ProducerRecord<K, V> getFailedProducerRecord() {
-		return (ProducerRecord<K, V>) producerRecord;
+		return (ProducerRecord<K, V>) this.producerRecord;
 	}
 
 }

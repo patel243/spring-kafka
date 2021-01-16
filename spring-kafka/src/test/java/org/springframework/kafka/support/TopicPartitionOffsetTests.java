@@ -14,22 +14,25 @@
  * limitations under the License.
  */
 
-package org.springframework.kafka.support.serializer;
+package org.springframework.kafka.support;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+
+import org.springframework.kafka.support.TopicPartitionOffset.SeekPosition;
 
 /**
- * Delegating key/value deserializer that catches exceptions, returning them
- * in the headers as serialized java objects.
- * Simply a subclass of {@link ErrorHandlingDeserializer} to enable deprecation.
- *
- * @param <T> class of the entity, representing messages
- *
  * @author Gary Russell
- * @since 2.5
- *
- * @deprecated in favor of ErrorHandlingDeserializer
+ * @since 2.3.13
  *
  */
-@Deprecated
-public class ErrorHandlingDeserializer2<T> extends ErrorHandlingDeserializer<T> {
+public class TopicPartitionOffsetTests {
+
+	@Test
+	void hashCodeTest() {
+		assertThat(new TopicPartitionOffset("foo", 1, SeekPosition.BEGINNING).hashCode())
+				.isNotEqualTo(new TopicPartitionOffset("foo",  1, SeekPosition.END).hashCode());
+	}
 
 }
